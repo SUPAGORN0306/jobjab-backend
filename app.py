@@ -9,7 +9,21 @@ import bcrypt
 import re
 import uuid
 from werkzeug.utils import secure_filename
-from PIL import Image
+
+import cloudinary
+import cloudinary.uploader
+import cloudinary.api
+
+# =============================================================================
+# CLOUDINARY CONFIG
+# =============================================================================
+
+cloudinary.config(
+    cloud_name=os.getenv("CLOUDINARY_CLOUD_NAME"),
+    api_key=os.getenv("CLOUDINARY_API_KEY"),
+    api_secret=os.getenv("CLOUDINARY_API_SECRET"),
+    secure=True,
+)
 
 # =============================================================================
 # CONSTANTS
@@ -39,24 +53,25 @@ app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 
 db.init_app(app)
 
-
 # =============================================================================
 # UPLOAD CONFIG
 # =============================================================================
 
-UPLOAD_FOLDER = os.path.join(os.path.dirname(__file__), 'uploads', 'avatars')
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'webp'}
+ALLOWED_RESUME_EXTENSIONS = {'pdf', 'doc', 'docx'}
 MAX_FILE_SIZE = 5 * 1024 * 1024  # 5 MB
 
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-
-app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 app.config['MAX_CONTENT_LENGTH'] = MAX_FILE_SIZE
 
 
 def allowed_file(filename):
     return '.' in filename and \
            filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+
+def allowed_resume_file(filename):
+    return '.' in filename and \
+           filename.rsplit('.', 1)[1].lower() in ALLOWED_RESUME_EXTENSIONS
 
 
 # =============================================================================
@@ -109,11 +124,33 @@ def generate_username_from_email(email, db_session):
         username = f"{base}_{counter}"
 
 
+def extract_cloudinary_public_id(url):
+    """
+    ดึง public_id จาก Cloudinary URL
+    เช่น https://res.cloudinary.com/xxx/image/upload/v123/jobjab/avatars/user_1_abc.jpg
+    → jobjab/avatars/user_1_abc
+    """
+    try:
+        if "res.cloudinary.com" not in url:
+            return None
+        # ตัดส่วนหลัง /upload/ ออก
+        part = url.split("/upload/")[-1]
+        # ตัด version (v1234567890/) ออกถ้ามี
+        if part.startswith("v") and "/" in part:
+            part = part.split("/", 1)[1]
+        # ตัด extension ออก
+        if "." in part:
+            part = part.rsplit(".", 1)[0]
+        return part
+    except Exception as e:
+        print(f"extract_cloudinary_public_id error: {e}")
+        return None
+
+
 # =============================================================================
 # MATCH SCORE CALCULATOR
 # =============================================================================
 
-# Industry mapping — ถ้าใกล้เคียง → ได้คะแนนกลาง
 INDUSTRY_RELATED = {
     "tech": ["e-commerce", "finance", "education"],
     "finance": ["tech", "e-commerce"],
@@ -128,7 +165,6 @@ INDUSTRY_RELATED = {
 def calculate_match_score(user_id, job_id, db_session):
     """
     คำนวณ Match Score ระหว่าง user กับ job
-    
     Weight:
     - Skills: 50%
     - Experience: 30%
@@ -338,7 +374,6 @@ def get_jobs():
             job_dict = dict(row)
             count = job_dict.get("applicant_count", 0)
             
-            # ⭐ คำนวณ Match Score + matched/missing
             if user_id:
                 match = calculate_match_score(user_id, job_dict["id"], db.session)
                 match_score = match["overall"]
@@ -351,11 +386,7 @@ def get_jobs():
                 missing_skills = match.get("missing_skills", [])
             else:
                 match_score = 75
-                match_breakdown = {
-                    "skills": 75,
-                    "experience": 75,
-                    "industry": 75,
-                }
+                match_breakdown = {"skills": 75, "experience": 75, "industry": 75}
                 matched_skills = []
                 missing_skills = []
             
@@ -375,8 +406,8 @@ def get_jobs():
                 "applicant_count": count,
                 "match_score": match_score,
                 "match_breakdown": match_breakdown,
-                "matched_skills": matched_skills,      # ⭐ เพิ่ม
-                "missing_skills": missing_skills,      # ⭐ เพิ่ม
+                "matched_skills": matched_skills,
+                "missing_skills": missing_skills,
                 "logo_letter": get_company_initial(job_dict.get("company_name")),
                 "logoClass": "bg-blue-500",
                 "work_mode": "Remote",
@@ -447,11 +478,7 @@ def get_job_detail(job_id):
             job_dict["missing_skills"] = match["missing_skills"]
         else:
             job_dict["match_score"] = 75
-            job_dict["match_breakdown"] = {
-                "skills": 75,
-                "experience": 75,
-                "industry": 75,
-            }
+            job_dict["match_breakdown"] = {"skills": 75, "experience": 75, "industry": 75}
             job_dict["matched_skills"] = []
             job_dict["missing_skills"] = []
         
@@ -1680,27 +1707,14 @@ def get_skills():
     except Exception as e:
         return {"error": str(e)}, 500
 
+
 # =============================================================================
-# UPLOAD: Resume
+# UPLOAD: Resume (Cloudinary)
 # =============================================================================
-
-RESUME_FOLDER = os.path.join(os.path.dirname(__file__), 'uploads', 'resumes')
-ALLOWED_RESUME_EXTENSIONS = {'pdf', 'doc', 'docx'}
-MAX_RESUME_SIZE = 5 * 1024 * 1024  # 5 MB
-
-os.makedirs(RESUME_FOLDER, exist_ok=True)
-
-app.config['RESUME_FOLDER'] = RESUME_FOLDER
-
-
-def allowed_resume_file(filename):
-    return '.' in filename and \
-           filename.rsplit('.', 1)[1].lower() in ALLOWED_RESUME_EXTENSIONS
-
 
 @app.route("/api/upload/resume", methods=["POST"])
 def upload_resume():
-    """อัปโหลด Resume"""
+    """อัปโหลด Resume → Cloudinary"""
     try:
         user_id = request.form.get("user_id")
         if not user_id:
@@ -1721,34 +1735,36 @@ def upload_resume():
                 "error": f"Invalid file type. Allowed: {', '.join(ALLOWED_RESUME_EXTENSIONS)}"
             }, 400
         
-        # สร้างชื่อไฟล์ใหม่ (unique)
+        # สร้าง public_id (unique)
         ext = file.filename.rsplit(".", 1)[1].lower()
-        filename = f"resume_user_{user_id}_{uuid.uuid4().hex[:8]}.{ext}"
-        filepath = os.path.join(app.config["RESUME_FOLDER"], filename)
+        public_id = f"jobjab/resumes/resume_user_{user_id}_{uuid.uuid4().hex[:8]}"
         
-        # บันทึกไฟล์
-        file.save(filepath)
+        # อัปโหลดขึ้น Cloudinary
+        upload_result = cloudinary.uploader.upload(
+            file,
+            public_id=public_id,
+            resource_type="raw",   # raw = pdf/doc/docx
+            overwrite=True,
+        )
         
-        # ลบไฟล์เก่า (ถ้ามี)
+        resume_url = upload_result["secure_url"]
+        filename = upload_result["public_id"].split("/")[-1] + "." + ext
+        
+        # ลบไฟล์เก่าใน Cloudinary (ถ้ามี)
         old = db.session.execute(
             text("SELECT resume_url FROM users WHERE id = :uid"),
             {"uid": user_id}
         ).first()
         
-        if old and old[0]:
-            old_path = old[0]
-            if old_path.startswith("/uploads/resumes/"):
-                old_filename = old_path.replace("/uploads/resumes/", "")
-                old_filepath = os.path.join(app.config["RESUME_FOLDER"], old_filename)
-                if os.path.exists(old_filepath):
-                    try:
-                        os.remove(old_filepath)
-                    except:
-                        pass
+        if old and old[0] and "res.cloudinary.com" in old[0]:
+            try:
+                old_public_id = extract_cloudinary_public_id(old[0])
+                if old_public_id:
+                    cloudinary.uploader.destroy(old_public_id, resource_type="raw")
+            except Exception as e:
+                print(f"Delete old resume from Cloudinary failed: {e}")
         
         # Update DB
-        resume_url = f"/uploads/resumes/{filename}"
-        
         db.session.execute(
             text("""
                 UPDATE users 
@@ -1776,7 +1792,7 @@ def upload_resume():
 
 @app.route("/api/resume/<int:user_id>", methods=["DELETE"])
 def delete_resume(user_id):
-    """ลบ Resume"""
+    """ลบ Resume (จาก Cloudinary + DB)"""
     try:
         old = db.session.execute(
             text("SELECT resume_url FROM users WHERE id = :uid"),
@@ -1786,17 +1802,16 @@ def delete_resume(user_id):
         if not old or not old[0]:
             return {"error": "No resume to delete"}, 404
         
-        old_path = old[0]
+        old_url = old[0]
         
-        # ลบไฟล์
-        if old_path.startswith("/uploads/resumes/"):
-            old_filename = old_path.replace("/uploads/resumes/", "")
-            old_filepath = os.path.join(app.config["RESUME_FOLDER"], old_filename)
-            if os.path.exists(old_filepath):
-                try:
-                    os.remove(old_filepath)
-                except:
-                    pass
+        # ลบไฟล์จาก Cloudinary
+        if "res.cloudinary.com" in old_url:
+            try:
+                old_public_id = extract_cloudinary_public_id(old_url)
+                if old_public_id:
+                    cloudinary.uploader.destroy(old_public_id, resource_type="raw")
+            except Exception as e:
+                print(f"Delete from Cloudinary failed: {e}")
         
         # Update DB
         db.session.execute(
@@ -1820,18 +1835,13 @@ def delete_resume(user_id):
         return {"error": str(e)}, 500
 
 
-@app.route("/uploads/resumes/<path:filename>")
-def serve_resume(filename):
-    """Serve Resume file"""
-    from flask import send_from_directory
-    return send_from_directory(app.config["RESUME_FOLDER"], filename)
-
 # =============================================================================
-# UPLOAD: Avatar
+# UPLOAD: Avatar (Cloudinary)
 # =============================================================================
 
 @app.route("/api/upload/avatar", methods=["POST"])
 def upload_avatar():
+    """อัปโหลด Avatar → Cloudinary"""
     try:
         user_id = request.form.get("user_id")
         if not user_id:
@@ -1852,40 +1862,38 @@ def upload_avatar():
                 "error": f"Invalid file type. Allowed: {', '.join(ALLOWED_EXTENSIONS)}"
             }, 400
         
-        ext = file.filename.rsplit(".", 1)[1].lower()
-        filename = f"user_{user_id}_{uuid.uuid4().hex[:8]}.{ext}"
-        filepath = os.path.join(app.config["UPLOAD_FOLDER"], filename)
+        # สร้าง public_id
+        public_id = f"jobjab/avatars/user_{user_id}_{uuid.uuid4().hex[:8]}"
         
-        file.save(filepath)
+        # อัปโหลดขึ้น Cloudinary (พร้อม resize + optimize)
+        upload_result = cloudinary.uploader.upload(
+            file,
+            public_id=public_id,
+            transformation=[
+                {"width": 500, "height": 500, "crop": "limit"},
+                {"quality": "auto", "fetch_format": "auto"},
+            ],
+            overwrite=True,
+        )
         
-        try:
-            if ext != "gif":
-                with Image.open(filepath) as img:
-                    if img.mode in ("RGBA", "P"):
-                        img = img.convert("RGB")
-                    img.thumbnail((500, 500), Image.LANCZOS)
-                    img.save(filepath, optimize=True, quality=85)
-        except Exception as e:
-            print(f"Image optimization failed: {e}")
+        image_url = upload_result["secure_url"]
+        filename = upload_result["public_id"].split("/")[-1]
         
+        # ลบไฟล์เก่าใน Cloudinary (ถ้ามี)
         old = db.session.execute(
             text("SELECT profile_image FROM users WHERE id = :uid"),
             {"uid": user_id}
         ).first()
         
-        if old and old[0]:
-            old_path = old[0]
-            if old_path.startswith("/uploads/avatars/"):
-                old_filename = old_path.replace("/uploads/avatars/", "")
-                old_filepath = os.path.join(app.config["UPLOAD_FOLDER"], old_filename)
-                if os.path.exists(old_filepath):
-                    try:
-                        os.remove(old_filepath)
-                    except:
-                        pass
+        if old and old[0] and "res.cloudinary.com" in old[0]:
+            try:
+                old_public_id = extract_cloudinary_public_id(old[0])
+                if old_public_id:
+                    cloudinary.uploader.destroy(old_public_id)
+            except Exception as e:
+                print(f"Delete old avatar failed: {e}")
         
-        image_url = f"/uploads/avatars/{filename}"
-        
+        # Update DB
         db.session.execute(
             text("""
                 UPDATE users 
@@ -1905,17 +1913,15 @@ def upload_avatar():
         
     except Exception as e:
         db.session.rollback()
-        print(f"Upload error: {e}")
+        print(f"Upload avatar error: {e}")
         import traceback
         traceback.print_exc()
         return {"error": str(e)}, 500
 
 
-@app.route("/uploads/avatars/<path:filename>")
-def serve_avatar(filename):
-    from flask import send_from_directory
-    return send_from_directory(app.config["UPLOAD_FOLDER"], filename)
-
+# =============================================================================
+# MATCH SCORE
+# =============================================================================
 
 @app.route("/api/match-score/<int:job_id>", methods=["GET"])
 def get_match_score(job_id):
