@@ -125,20 +125,13 @@ def generate_username_from_email(email, db_session):
 
 
 def extract_cloudinary_public_id(url):
-    """
-    ดึง public_id จาก Cloudinary URL
-    เช่น https://res.cloudinary.com/xxx/image/upload/v123/jobjab/avatars/user_1_abc.jpg
-    → jobjab/avatars/user_1_abc
-    """
+    """ดึง public_id จาก Cloudinary URL"""
     try:
         if "res.cloudinary.com" not in url:
             return None
-        # ตัดส่วนหลัง /upload/ ออก
         part = url.split("/upload/")[-1]
-        # ตัด version (v1234567890/) ออกถ้ามี
         if part.startswith("v") and "/" in part:
             part = part.split("/", 1)[1]
-        # ตัด extension ออก
         if "." in part:
             part = part.rsplit(".", 1)[0]
         return part
@@ -148,7 +141,7 @@ def extract_cloudinary_public_id(url):
 
 
 # =============================================================================
-# MATCH SCORE CALCULATOR
+# MATCH SCORE (OPTIMIZED — NO N+1)
 # =============================================================================
 
 INDUSTRY_RELATED = {
@@ -162,44 +155,61 @@ INDUSTRY_RELATED = {
 }
 
 
-def calculate_match_score(user_id, job_id, db_session):
+def load_user_data(user_id, db_session):
     """
-    คำนวณ Match Score ระหว่าง user กับ job
-    Weight:
-    - Skills: 50%
-    - Experience: 30%
-    - Industry: 20%
+    โหลดข้อมูล user ทั้งหมดครั้งเดียว (ลด N+1 query)
+    ใช้ครั้งเดียวต่อ request → แทนที่จะ query ทุก job
     """
     try:
-        # === 1. โหลด Job ===
-        job = db_session.execute(
-            text("""
-                SELECT skills_required, experience_level, industry
-                FROM job_market_data WHERE id = :jid
-            """),
-            {"jid": job_id}
+        # Industry
+        user = db_session.execute(
+            text("SELECT industry FROM users WHERE id = :uid"),
+            {"uid": user_id}
         ).mappings().first()
         
-        if not job:
-            return {
-                "overall": 0,
-                "skills_match": 0,
-                "experience_match": 0,
-                "industry_match": 0,
-                "matched_skills": [],
-                "missing_skills": [],
-                "total_years": 0,
-            }
-        
-        # === 2. SKILLS MATCH ===
-        job_skills_raw = (job["skills_required"] or "").lower()
-        job_skills = [s.strip() for s in job_skills_raw.split(",") if s.strip()]
-        
-        user_skills_result = db_session.execute(
+        # Skills
+        skills_result = db_session.execute(
             text("SELECT skill_name FROM user_skills WHERE user_id = :uid"),
             {"uid": user_id}
         ).fetchall()
-        user_skills = [s[0].lower().strip() for s in user_skills_result]
+        
+        # Total years of experience
+        exp_result = db_session.execute(
+            text("""
+                SELECT 
+                    COALESCE(SUM(
+                        EXTRACT(EPOCH FROM (
+                            COALESCE(end_date, NOW()) - start_date
+                        )) / (365.25 * 24 * 3600)
+                    ), 0) AS total_years
+                FROM user_experience 
+                WHERE user_id = :uid
+            """),
+            {"uid": user_id}
+        ).mappings().first()
+        
+        return {
+            "industry": (user["industry"] or "").lower().strip() if user else "",
+            "skills": [s[0].lower().strip() for s in skills_result],
+            "total_years": float(exp_result["total_years"] or 0) if exp_result else 0,
+        }
+    except Exception as e:
+        print(f"load_user_data error: {e}")
+        import traceback
+        traceback.print_exc()
+        return {"industry": "", "skills": [], "total_years": 0}
+
+
+def calculate_match_score_fast(job_row, user_data):
+    """
+    คำนวณ Match Score แบบเร็ว — ใช้ข้อมูล user ที่ preload แล้ว
+    ไม่ query DB → เร็วมาก
+    """
+    try:
+        # === 1. SKILLS MATCH ===
+        job_skills_raw = (job_row.get("skills_required") or "").lower()
+        job_skills = [s.strip() for s in job_skills_raw.split(",") if s.strip()]
+        user_skills = user_data["skills"]
         
         matched_skills = []
         missing_skills = []
@@ -216,32 +226,10 @@ def calculate_match_score(user_id, job_id, db_session):
         
         skills_match = round((len(matched_skills) / len(job_skills)) * 100) if job_skills else 0
         
-        # === 3. EXPERIENCE MATCH ===
-        exp_result = db_session.execute(
-            text("""
-                SELECT 
-                    SUM(
-                        EXTRACT(EPOCH FROM (
-                            COALESCE(end_date, NOW()) - start_date
-                        )) / (365.25 * 24 * 3600)
-                    ) AS total_years
-                FROM user_experience 
-                WHERE user_id = :uid
-            """),
-            {"uid": user_id}
-        ).mappings().first()
-        
-        total_years = float(exp_result["total_years"] or 0) if exp_result else 0
-        
-        level_requirements = {
-            "entry": 0,
-            "junior": 0,
-            "mid": 2,
-            "senior": 5,
-            "lead": 7,
-        }
-        
-        job_level = (job["experience_level"] or "mid").lower()
+        # === 2. EXPERIENCE MATCH ===
+        total_years = user_data["total_years"]
+        level_requirements = {"entry": 0, "junior": 0, "mid": 2, "senior": 5, "lead": 7}
+        job_level = (job_row.get("experience_level") or "mid").lower()
         required_years = level_requirements.get(job_level, 2)
         
         if required_years == 0:
@@ -249,14 +237,9 @@ def calculate_match_score(user_id, job_id, db_session):
         else:
             exp_match = min(round((total_years / required_years) * 100), 100)
         
-        # === 4. INDUSTRY FIT ===
-        user_result = db_session.execute(
-            text("SELECT industry FROM users WHERE id = :uid"),
-            {"uid": user_id}
-        ).mappings().first()
-        
-        user_industry = (user_result["industry"] or "").lower().strip() if user_result else ""
-        job_industry = (job["industry"] or "").lower().strip()
+        # === 3. INDUSTRY FIT ===
+        user_industry = user_data["industry"]
+        job_industry = (job_row.get("industry") or "").lower().strip()
         
         if not user_industry or not job_industry:
             industry_match = 50
@@ -269,12 +252,8 @@ def calculate_match_score(user_id, job_id, db_session):
         else:
             industry_match = 40
         
-        # === 5. OVERALL ===
-        overall = round(
-            skills_match * 0.5 +
-            exp_match * 0.3 +
-            industry_match * 0.2
-        )
+        # === 4. OVERALL ===
+        overall = round(skills_match * 0.5 + exp_match * 0.3 + industry_match * 0.2)
         
         return {
             "overall": overall,
@@ -286,16 +265,10 @@ def calculate_match_score(user_id, job_id, db_session):
             "total_years": round(total_years, 1),
         }
     except Exception as e:
-        print(f"Match score error: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"calculate_match_score_fast error: {e}")
         return {
-            "overall": 0,
-            "skills_match": 0,
-            "experience_match": 0,
-            "industry_match": 0,
-            "matched_skills": [],
-            "missing_skills": [],
+            "overall": 0, "skills_match": 0, "experience_match": 0,
+            "industry_match": 0, "matched_skills": [], "missing_skills": [],
             "total_years": 0,
         }
 
@@ -351,7 +324,7 @@ def debug_routes():
 
 @app.route("/api/jobs")
 def get_jobs():
-    """ดึงงานทั้งหมด พร้อม Match Score + matched/missing skills"""
+    """ดึงงานทั้งหมด พร้อม Match Score — ใช้ preload ลด N+1"""
     try:
         user_id = request.args.get("user_id", type=int)
         
@@ -369,13 +342,17 @@ def get_jobs():
         """))
         rows = result.mappings().all()
         
+        # ⭐ Preload user data ครั้งเดียว (ไม่ query ซ้ำในแต่ละ job)
+        user_data = load_user_data(user_id, db.session) if user_id else None
+        
         jobs_list = []
         for row in rows:
             job_dict = dict(row)
             count = job_dict.get("applicant_count", 0)
             
-            if user_id:
-                match = calculate_match_score(user_id, job_dict["id"], db.session)
+            if user_id and user_data:
+                # ⚡ คำนวณเร็ว — ไม่ query DB
+                match = calculate_match_score_fast(job_dict, user_data)
                 match_score = match["overall"]
                 match_breakdown = {
                     "skills": match["skills_match"],
@@ -467,7 +444,9 @@ def get_job_detail(job_id):
         )
         
         if user_id:
-            match = calculate_match_score(user_id, job_id, db.session)
+            # ⚡ ใช้ preload + fast calculator
+            user_data = load_user_data(user_id, db.session)
+            match = calculate_match_score_fast(job_dict, user_data)
             job_dict["match_score"] = match["overall"]
             job_dict["match_breakdown"] = {
                 "skills": match["skills_match"],
@@ -1735,22 +1714,19 @@ def upload_resume():
                 "error": f"Invalid file type. Allowed: {', '.join(ALLOWED_RESUME_EXTENSIONS)}"
             }, 400
         
-        # สร้าง public_id (unique)
         ext = file.filename.rsplit(".", 1)[1].lower()
         public_id = f"jobjab/resumes/resume_user_{user_id}_{uuid.uuid4().hex[:8]}"
         
-        # อัปโหลดขึ้น Cloudinary
         upload_result = cloudinary.uploader.upload(
             file,
             public_id=public_id,
-            resource_type="raw",   # raw = pdf/doc/docx
+            resource_type="raw",
             overwrite=True,
         )
         
         resume_url = upload_result["secure_url"]
         filename = upload_result["public_id"].split("/")[-1] + "." + ext
         
-        # ลบไฟล์เก่าใน Cloudinary (ถ้ามี)
         old = db.session.execute(
             text("SELECT resume_url FROM users WHERE id = :uid"),
             {"uid": user_id}
@@ -1764,7 +1740,6 @@ def upload_resume():
             except Exception as e:
                 print(f"Delete old resume from Cloudinary failed: {e}")
         
-        # Update DB
         db.session.execute(
             text("""
                 UPDATE users 
@@ -1804,7 +1779,6 @@ def delete_resume(user_id):
         
         old_url = old[0]
         
-        # ลบไฟล์จาก Cloudinary
         if "res.cloudinary.com" in old_url:
             try:
                 old_public_id = extract_cloudinary_public_id(old_url)
@@ -1813,7 +1787,6 @@ def delete_resume(user_id):
             except Exception as e:
                 print(f"Delete from Cloudinary failed: {e}")
         
-        # Update DB
         db.session.execute(
             text("""
                 UPDATE users 
@@ -1862,10 +1835,8 @@ def upload_avatar():
                 "error": f"Invalid file type. Allowed: {', '.join(ALLOWED_EXTENSIONS)}"
             }, 400
         
-        # สร้าง public_id
         public_id = f"jobjab/avatars/user_{user_id}_{uuid.uuid4().hex[:8]}"
         
-        # อัปโหลดขึ้น Cloudinary (พร้อม resize + optimize)
         upload_result = cloudinary.uploader.upload(
             file,
             public_id=public_id,
@@ -1879,7 +1850,6 @@ def upload_avatar():
         image_url = upload_result["secure_url"]
         filename = upload_result["public_id"].split("/")[-1]
         
-        # ลบไฟล์เก่าใน Cloudinary (ถ้ามี)
         old = db.session.execute(
             text("SELECT profile_image FROM users WHERE id = :uid"),
             {"uid": user_id}
@@ -1893,7 +1863,6 @@ def upload_avatar():
             except Exception as e:
                 print(f"Delete old avatar failed: {e}")
         
-        # Update DB
         db.session.execute(
             text("""
                 UPDATE users 
@@ -1920,7 +1889,7 @@ def upload_avatar():
 
 
 # =============================================================================
-# MATCH SCORE
+# MATCH SCORE (single job)
 # =============================================================================
 
 @app.route("/api/match-score/<int:job_id>", methods=["GET"])
@@ -1930,7 +1899,20 @@ def get_match_score(job_id):
         if not user_id:
             return {"error": "user_id is required"}, 400
         
-        match = calculate_match_score(user_id, job_id, db.session)
+        # Load job info
+        job = db.session.execute(
+            text("""
+                SELECT id, skills_required, experience_level, industry
+                FROM job_market_data WHERE id = :jid
+            """),
+            {"jid": job_id}
+        ).mappings().first()
+        
+        if not job:
+            return {"error": "Job not found"}, 404
+        
+        user_data = load_user_data(user_id, db.session)
+        match = calculate_match_score_fast(dict(job), user_data)
         return match, 200
     except Exception as e:
         return {"error": str(e)}, 500
