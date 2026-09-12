@@ -46,7 +46,14 @@ load_dotenv()
 db = SQLAlchemy()
 
 app = Flask(__name__)
-CORS(app)
+
+CORS(app, origins=[
+    "http://localhost:5173",
+    "http://localhost:3000",
+    "http://127.0.0.1:5173",
+    "https://joblab-one.vercel.app",
+    "https://*.vercel.app",
+])
 
 app.config["SQLALCHEMY_DATABASE_URI"] = os.getenv("DATABASE_URL")
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
