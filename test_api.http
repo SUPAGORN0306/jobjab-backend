@@ -1,0 +1,92 @@
+### 1. ดึงข้อมูล Profile ครบ
+GET http://localhost:5000/api/profile/1/full
+
+### 2. อัปเดต Profile (Edit Profile)
+PUT http://localhost:5000/api/profile/1
+Content-Type: application/json
+
+{
+  "full_name": "Nichakan Srisuk",
+  "phone": "+66 91 234 5678",
+  "location": "Bangkok, Thailand",
+  "bio": "Product Designer who loves clean UI",
+  "skills": [
+    { "name": "Figma", "level": "Expert" },
+    { "name": "Design systems", "level": "Advanced" }
+  ],
+  "experiences": [
+    {
+      "job_title": "Product Designer",
+      "company_name": "Wise",
+      "location": "Remote",
+      "start_date": "2023-01-01",
+      "end_date": null,
+      "is_current": true,
+      "description": "Leading design system"
+    }
+  ],
+  "educations": [
+    {
+      "institution": "Chulalongkorn University",
+      "degree": "Bachelor",
+      "field_of_study": "Computer Science",
+      "start_date": "2017-01-01",
+      "end_date": "2021-01-01",
+      "is_current": false,
+      "gpa": 3.50
+    }
+  ]
+}
+
+### 3. สมัครงาน + Snapshot
+POST http://localhost:5000/api/applications
+Content-Type: application/json
+
+{
+  "user_id": 1,
+  "jobId": 5,
+  "fullName": "Nichakan Srisuk (Edited on Apply)",
+  "email": "nichakan@email.com",
+  "phone": "+66 99 999 9999",
+  "location": "Chiang Mai, Thailand",
+  "resumeFilename": "Nichakan_Resume_v2.pdf",
+  "coverLetter": "I am very interested in this role...",
+  "skills": [
+    { "name": "Figma", "level": "Expert" },
+    { "name": "Prototyping", "level": "Advanced" }
+  ],
+  "experiences": [
+    {
+      "job_title": "Product Designer",
+      "company_name": "Wise",
+      "location": "Remote",
+      "start_date": "2023-01-01",
+      "end_date": null,
+      "is_current": true,
+      "description": "Leading design system"
+    }
+  ],
+  "educations": [
+    {
+      "institution": "Chulalongkorn University",
+      "degree": "Bachelor",
+      "field_of_study": "Computer Science",
+      "start_date": "2017-01-01",
+      "end_date": "2021-01-01",
+      "is_current": false,
+      "gpa": 3.50
+    }
+  ]
+}
+
+### 4. ดูรายละเอียดใบสมัคร (Snapshot)
+GET http://localhost:5000/api/applications/12/detail
+
+### 5. ดูใบสมัครทั้งหมดของผู้ใช้
+GET http://localhost:5000/api/applications/user/1
+
+### 6. ดูงานทั้งหมด
+GET http://localhost:5000/api/jobs
+
+### 7. ดูรายละเอียดงาน
+GET http://localhost:5000/api/jobs/5

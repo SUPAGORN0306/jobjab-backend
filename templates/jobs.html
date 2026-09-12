@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Job Market</title>
+    <style>
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        th, td {
+            border: 1px solid black;
+            padding: 8px;
+            text-align: left;
+        }
+        th {
+            background-color: #f2f2f2;
+        }
+    </style>
+</head>
+<body>
+    <h1>Tables</h1>
+    <a href="/tables">📋 ดูทุกตาราง</a>
+    <hr>
+
+    <table>
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>Company</th>
+                <th>Industry</th>
+                <th>Job Title</th>
+                <th>Skills</th>
+                <th>Experience</th>
+                <th>Employment Type</th>
+                <th>Location</th>
+                <th>Salary Min</th>
+                <th>Salary Max</th>
+                <th>Posted Date</th>
+                <th>Company Size</th>
+                <th>Tools</th>
+            </tr>
+        </thead>
+        <tbody id="job-table"></tbody>
+    </table>
+
+    <script>
+        fetch("/api/jobs")
+            .then(response => response.json())
+            .then(data => {
+                const table = document.getElementById("job-table");
+                
+                if (data.error) {
+                    table.innerHTML = `<tr><td colspan="13" style="text-align:center;color:red;">❌ ${data.error}</td></tr>`;
+                    return;
+                }
+
+                data.jobs.forEach(job => {
+                    const row = document.createElement("tr");
+                    row.innerHTML = `
+                        <td>${job.id ?? ''}</td>
+                        <td>${job.company_name ?? ''}</td>
+                        <td>${job.industry ?? ''}</td>
+                        <td>${job.job_title ?? ''}</td>
+                        <td>${job.skills_required ?? ''}</td>
+                        <td>${job.experience_level ?? ''}</td>
+                        <td>${job.employment_type ?? ''}</td>
+                        <td>${job.location ?? ''}</td>
+                        <td>${job.salary_min ?? ''}</td>
+                        <td>${job.salary_max ?? ''}</td>
+                        <td>${job.posted_date ?? ''}</td>
+                        <td>${job.company_size ?? ''}</td>
+                        <td>${job.tools_preferred ?? ''}</td>
+                    `;
+                    table.appendChild(row);
+                });
+            })
+            .catch(error => {
+                console.error("Error loading jobs:", error);
+                document.getElementById("job-table").innerHTML = 
+                    `<tr><td colspan="13" style="text-align:center;color:red;">❌ Error: ${error.message}</td></tr>`;
+            });
+    </script>
+</body>
+</html>

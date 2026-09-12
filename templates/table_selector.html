@@ -1,0 +1,611 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>📊 เลือกแสดงตาราง</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #f0f2f5;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .header {
+            background: white;
+            padding: 24px 32px;
+            border-radius: 12px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+            margin-bottom: 24px;
+        }
+
+        .header h1 {
+            color: #1a1a2e;
+            font-size: 28px;
+            margin-bottom: 8px;
+        }
+
+        .header p {
+            color: #666;
+            font-size: 15px;
+        }
+
+        .selector-section {
+            background: white;
+            padding: 20px 32px;
+            border-radius: 12px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+            margin-bottom: 24px;
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 16px;
+        }
+
+        .selector-section label {
+            font-weight: 600;
+            color: #1a1a2e;
+            font-size: 15px;
+        }
+
+        .table-select {
+            padding: 10px 16px;
+            border: 2px solid #e9ecef;
+            border-radius: 8px;
+            font-size: 15px;
+            background: white;
+            min-width: 250px;
+            cursor: pointer;
+            transition: border-color 0.3s;
+        }
+
+        .table-select:hover {
+            border-color: #1a1a2e;
+        }
+
+        .table-select:focus {
+            outline: none;
+            border-color: #1a1a2e;
+        }
+
+        .btn {
+            padding: 10px 24px;
+            background: #1a1a2e;
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 15px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background 0.3s;
+        }
+
+        .btn:hover {
+            background: #16213e;
+        }
+
+        .btn-secondary {
+            background: #e9ecef;
+            color: #1a1a2e;
+        }
+
+        .btn-secondary:hover {
+            background: #dee2e6;
+        }
+
+        .btn-success {
+            background: #28a745;
+        }
+
+        .btn-success:hover {
+            background: #218838;
+        }
+
+        .btn-danger {
+            background: #dc3545;
+        }
+
+        .btn-danger:hover {
+            background: #c82333;
+        }
+
+        .btn-group {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        .checkbox-group {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 12px;
+            padding: 8px 0;
+        }
+
+        .checkbox-group label {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-weight: normal;
+            font-size: 14px;
+            cursor: pointer;
+            padding: 6px 12px;
+            background: #f8f9fa;
+            border-radius: 6px;
+            border: 2px solid transparent;
+            transition: all 0.3s;
+        }
+
+        .checkbox-group label:hover {
+            background: #e9ecef;
+        }
+
+        .checkbox-group label.active {
+            border-color: #1a1a2e;
+            background: #e9ecef;
+        }
+
+        .checkbox-group input[type="checkbox"] {
+            width: 16px;
+            height: 16px;
+            cursor: pointer;
+        }
+
+        .table-section {
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+            margin-bottom: 24px;
+            overflow: hidden;
+        }
+
+        .table-header {
+            background: #1a1a2e;
+            color: white;
+            padding: 14px 24px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            cursor: pointer;
+        }
+
+        .table-header:hover {
+            background: #16213e;
+        }
+
+        .table-header h2 {
+            font-size: 18px;
+            font-weight: 600;
+        }
+
+        .table-header .badge {
+            background: rgba(255,255,255,0.2);
+            padding: 4px 14px;
+            border-radius: 20px;
+            font-size: 13px;
+        }
+
+        .table-header .arrow {
+            transition: transform 0.3s;
+            font-size: 16px;
+        }
+
+        .table-header .arrow.collapsed {
+            transform: rotate(-90deg);
+        }
+
+        .table-wrapper {
+            overflow-x: auto;
+            padding: 16px 20px;
+            transition: max-height 0.3s ease;
+        }
+
+        .table-wrapper.collapsed {
+            display: none;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 14px;
+        }
+
+        th {
+            background: #f8f9fa;
+            color: #1a1a2e;
+            font-weight: 600;
+            padding: 10px 14px;
+            text-align: left;
+            border-bottom: 2px solid #e9ecef;
+            white-space: nowrap;
+            position: sticky;
+            top: 0;
+        }
+
+        td {
+            padding: 8px 14px;
+            border-bottom: 1px solid #e9ecef;
+            max-width: 200px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        tr:hover {
+            background: #f8f9fa;
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 40px;
+            color: #999;
+        }
+
+        .empty-state .icon {
+            font-size: 48px;
+            margin-bottom: 12px;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: #666;
+        }
+
+        .loading .spinner {
+            display: inline-block;
+            width: 30px;
+            height: 30px;
+            border: 3px solid #e9ecef;
+            border-top-color: #1a1a2e;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .error {
+            background: #fee;
+            color: #c00;
+            padding: 16px 20px;
+            border-radius: 8px;
+            margin-bottom: 16px;
+        }
+
+        .data-count {
+            color: #666;
+            font-size: 13px;
+            margin-top: 4px;
+        }
+
+        .hidden {
+            display: none !important;
+        }
+
+        @media (max-width: 768px) {
+            body { padding: 10px; }
+            .header { padding: 16px 20px; }
+            .selector-section { padding: 16px 20px; flex-direction: column; align-items: stretch; }
+            .table-select { min-width: auto; }
+            .btn-group { justify-content: center; }
+            .checkbox-group { justify-content: center; }
+            td, th { padding: 6px 10px; font-size: 12px; }
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <div class="header">
+        <h1>📊 ฐานข้อมูล Job Market</h1>
+        <p>เลือกตารางที่ต้องการแสดงข้อมูล</p>
+    </div>
+
+    <div class="selector-section">
+        <div style="flex: 1; min-width: 200px;">
+            <label for="tableSelect">🔍 เลือกตาราง:</label>
+            <select id="tableSelect" class="table-select">
+                <option value="all">📋 แสดงทั้งหมด</option>
+                <option value="users">👤 users</option>
+                <option value="user_skills">🛠️ user_skills</option>
+                <option value="user_experience">💼 user_experience</option>
+                <option value="user_education">🎓 user_education</option>
+                <option value="job_market_data">📊 job_market_data</option>
+                <option value="jobs">📊 jobs</option>
+                <option value="job_posts">📊 job_posts</option>
+                <option value="favorites">⭐ favorites</option>
+                <option value="applications">📝 applications</option>
+            </select>
+        </div>
+        <div class="btn-group">
+            <button class="btn" onclick="loadSelectedTable()">แสดง</button>
+            <button class="btn btn-secondary" onclick="showAll()">แสดงทั้งหมด</button>
+            <button class="btn btn-secondary" onclick="hideAll()">ซ่อนทั้งหมด</button>
+        </div>
+    </div>
+
+    <div class="selector-section">
+        <label>🎯 เลือกหลายตาราง:</label>
+        <div class="checkbox-group" id="checkboxGroup">
+            <label>
+                <input type="checkbox" value="users" onchange="updateTableSelection()">
+                👤 users
+            </label>
+            <label>
+                <input type="checkbox" value="user_skills" onchange="updateTableSelection()">
+                🛠️ user_skills
+            </label>
+            <label>
+                <input type="checkbox" value="user_experience" onchange="updateTableSelection()">
+                💼 user_experience
+            </label>
+            <label>
+                <input type="checkbox" value="user_education" onchange="updateTableSelection()">
+                🎓 user_education
+            </label>
+            <label>
+                <input type="checkbox" value="job_market_data" onchange="updateTableSelection()">
+                📊 job_market_data
+            </label>
+            <label>
+                <input type="checkbox" value="jobs" onchange="updateTableSelection()">
+                📊 jobs
+            </label>
+            <label>
+                <input type="checkbox" value="job_posts" onchange="updateTableSelection()">
+                📊 job_posts
+            </label>
+            <label>
+                <input type="checkbox" value="favorites" onchange="updateTableSelection()">
+                ⭐ favorites
+            </label>
+            <label>
+                <input type="checkbox" value="applications" onchange="updateTableSelection()">
+                📝 applications
+            </label>
+        </div>
+        <button class="btn btn-success" onclick="loadCheckedTables()">แสดงที่เลือก</button>
+        <button class="btn btn-secondary" onclick="uncheckAll()">ยกเลิกทั้งหมด</button>
+    </div>
+
+    <div id="loading" class="loading hidden">
+        <div class="spinner"></div>
+        <p style="margin-top: 12px;">กำลังโหลดข้อมูล...</p>
+    </div>
+
+    <div id="error" class="error hidden"></div>
+    <div id="content"></div>
+</div>
+
+<script>
+    let allTablesData = {};
+
+    function loadAllData() {
+        document.getElementById('loading').classList.remove('hidden');
+        document.getElementById('error').classList.add('hidden');
+
+        fetch('/api/all-tables-data')
+            .then(response => response.json())
+            .then(data => {
+                document.getElementById('loading').classList.add('hidden');
+
+                if (data.error) {
+                    showError('❌ Error: ' + data.error);
+                    return;
+                }
+
+                allTablesData = data;
+                
+                const selected = document.getElementById('tableSelect').value;
+                if (selected === 'all') {
+                    renderAllTables();
+                } else {
+                    renderSingleTable(selected);
+                }
+            })
+            .catch(error => {
+                document.getElementById('loading').classList.add('hidden');
+                showError('❌ Error: ' + error.message);
+            });
+    }
+
+    function showError(msg) {
+        const el = document.getElementById('error');
+        el.textContent = msg;
+        el.classList.remove('hidden');
+    }
+
+    function renderSingleTable(tableName) {
+        const content = document.getElementById('content');
+        const data = allTablesData[tableName];
+
+        if (!data) {
+            content.innerHTML = `<div class="empty-state"><div class="icon">📭</div><p>ไม่พบตาราง: ${tableName}</p></div>`;
+            return;
+        }
+
+        let html = createTableHTML(tableName, data);
+        content.innerHTML = html;
+    }
+
+    function renderAllTables() {
+        const content = document.getElementById('content');
+        let html = '';
+
+        const tableNames = Object.keys(allTablesData).sort();
+        tableNames.forEach(name => {
+            html += createTableHTML(name, allTablesData[name]);
+        });
+
+        content.innerHTML = html;
+    }
+
+    function createTableHTML(tableName, tableData) {
+        const columns = tableData.columns || [];
+        const data = tableData.data || [];
+        const totalRows = data.length;
+
+        let html = `
+            <div class="table-section">
+                <div class="table-header" onclick="toggleTable('${tableName}')">
+                    <div>
+                        <h2>📋 ${tableName}</h2>
+                        <span class="data-count">${totalRows} แถว</span>
+                    </div>
+                    <div style="display: flex; align-items: center; gap: 12px;">
+                        <span class="badge">${columns.length} คอลัมน์</span>
+                        <span class="arrow" id="arrow-${tableName}">▼</span>
+                    </div>
+                </div>
+                <div class="table-wrapper" id="wrapper-${tableName}">
+        `;
+
+        if (totalRows === 0) {
+            html += `
+                <div class="empty-state">
+                    <div class="icon">📭</div>
+                    <p>ไม่มีข้อมูลในตารางนี้</p>
+                </div>
+            `;
+        } else {
+            html += `<table><thead><tr>`;
+            columns.forEach(col => {
+                html += `<th>${col}</th>`;
+            });
+            html += `</tr></thead><tbody>`;
+
+            data.forEach(row => {
+                html += `<tr>`;
+                columns.forEach(col => {
+                    let value = row[col];
+                    if (value === null || value === undefined) value = '';
+                    if (typeof value === 'object') value = JSON.stringify(value);
+                    html += `<td>${String(value)}</td>`;
+                });
+                html += `</tr>`;
+            });
+
+            html += `</tbody></table>`;
+        }
+
+        html += `
+                </div>
+            </div>
+        `;
+
+        return html;
+    }
+
+    function toggleTable(tableId) {
+        const wrapper = document.getElementById(`wrapper-${tableId}`);
+        const arrow = document.getElementById(`arrow-${tableId}`);
+        
+        if (wrapper) {
+            if (wrapper.classList.contains('collapsed')) {
+                wrapper.classList.remove('collapsed');
+                if (arrow) arrow.classList.remove('collapsed');
+            } else {
+                wrapper.classList.add('collapsed');
+                if (arrow) arrow.classList.add('collapsed');
+            }
+        }
+    }
+
+    function loadSelectedTable() {
+        const selected = document.getElementById('tableSelect').value;
+        if (selected === 'all') {
+            renderAllTables();
+        } else {
+            renderSingleTable(selected);
+        }
+        updateCheckboxes();
+    }
+
+    function showAll() {
+        renderAllTables();
+        document.getElementById('tableSelect').value = 'all';
+        updateCheckboxes();
+    }
+
+    function hideAll() {
+        document.getElementById('content').innerHTML = `
+            <div class="empty-state" style="padding: 60px;">
+                <div class="icon">🙈</div>
+                <p>ซ่อนตารางทั้งหมดแล้ว</p>
+                <p style="font-size: 14px; color: #aaa;">เลือกตารางเพื่อแสดงข้อมูล</p>
+            </div>
+        `;
+    }
+
+    function updateCheckboxes() {
+        const selected = document.getElementById('tableSelect').value;
+        const checkboxes = document.querySelectorAll('#checkboxGroup input[type="checkbox"]');
+        checkboxes.forEach(cb => {
+            cb.checked = (selected === 'all' || cb.value === selected);
+            cb.parentElement.classList.toggle('active', cb.checked);
+        });
+    }
+
+    function updateTableSelection() {
+        const checkboxes = document.querySelectorAll('#checkboxGroup input[type="checkbox"]:checked');
+        if (checkboxes.length === 0) {
+            document.getElementById('tableSelect').value = 'all';
+        } else if (checkboxes.length === 1) {
+            document.getElementById('tableSelect').value = checkboxes[0].value;
+        } else {
+            document.getElementById('tableSelect').value = 'all';
+        }
+        
+        document.querySelectorAll('#checkboxGroup label').forEach(label => {
+            label.classList.toggle('active', label.querySelector('input').checked);
+        });
+    }
+
+    function loadCheckedTables() {
+        const checkboxes = document.querySelectorAll('#checkboxGroup input[type="checkbox"]:checked');
+        const selectedTables = Array.from(checkboxes).map(cb => cb.value);
+
+        if (selectedTables.length === 0) {
+            hideAll();
+            return;
+        }
+
+        const content = document.getElementById('content');
+        let html = '';
+
+        selectedTables.forEach(name => {
+            if (allTablesData[name]) {
+                html += createTableHTML(name, allTablesData[name]);
+            }
+        });
+
+        content.innerHTML = html || `<div class="empty-state"><div class="icon">📭</div><p>ไม่พบข้อมูล</p></div>`;
+    }
+
+    function uncheckAll() {
+        document.querySelectorAll('#checkboxGroup input[type="checkbox"]').forEach(cb => {
+            cb.checked = false;
+            cb.parentElement.classList.remove('active');
+        });
+        document.getElementById('tableSelect').value = 'all';
+        hideAll();
+    }
+
+    document.addEventListener('DOMContentLoaded', loadAllData);
+</script>
+
+</body>
+</html>
