@@ -774,7 +774,7 @@ def get_application_detail(application_id):
             """),
             {"application_id": application_id}
         )
-        
+
         application = app_result.mappings().first()
         if not application:
             return {"error": "Application not found"}, 404
@@ -1744,7 +1744,7 @@ def upload_resume():
             }, 400
         
         ext = file.filename.rsplit(".", 1)[1].lower()
-        public_id = f"jobjab/resumes/resume_user_{user_id}_{uuid.uuid4().hex[:8]}"
+        public_id = f"jobjab/resumes/resume_user_{user_id}_{uuid.uuid4().hex[:8]}.{ext}"
         
         upload_result = cloudinary.uploader.upload(
             file,
