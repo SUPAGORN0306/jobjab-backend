@@ -52,6 +52,7 @@ CORS(app, origins=[
     "http://localhost:3000",
     "http://127.0.0.1:5173",
     "https://joblab-one.vercel.app",
+    "https://jobjab-one.vercel.app",  
     "https://*.vercel.app",
 ])
 
