@@ -863,11 +863,21 @@ def create_application():
             return {"error": "You have already applied for this position"}, 400
         
         job_check = db.session.execute(
-            text("SELECT id FROM job_market_data WHERE id = :job_id"),
+            text("""
+                SELECT id, posted_by_user_id
+                FROM job_market_data WHERE id = :job_id
+            """),
             {"job_id": job_id}
         )
-        if not job_check.first():
+
+        job_row = job_check.first()
+        if not job_row:
             return {"error": "Job not found"}, 404
+
+        if job_row[1] and job_row[1] == user_id:
+            return {
+                "error": "You cannot apply to a job that you posted"
+            }, 400
         
         result = db.session.execute(
             text("""
