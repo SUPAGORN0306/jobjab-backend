@@ -59,6 +59,18 @@ CORS(app, origins=[
 app.config["SQLALCHEMY_DATABASE_URI"] = os.getenv("DATABASE_URL")
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 
+# แก้ปัญหา Neon SSL connection หลุด
+app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {
+    "pool_pre_ping": True,       # เช็ค connection ก่อนใช้
+    "pool_recycle": 300,          # recycle connection ทุก 5 นาที
+    "pool_size": 5,
+    "max_overflow": 2,
+    "connect_args": {
+        "sslmode": "require",
+        "connect_timeout": 10,
+    },
+}
+
 db.init_app(app)
 
 # =============================================================================
