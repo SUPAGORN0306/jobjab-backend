@@ -1196,7 +1196,7 @@ def auth_login():
         if "employer" in roles:
             emp_result = db.session.execute(
                 text("""
-                    SELECT company_name, industry
+                    SELECT company_name, industry, company_logo
                     FROM employer_profiles WHERE user_id = :uid
                 """),
                 {"uid": user["id"]}
@@ -1205,6 +1205,7 @@ def auth_login():
             if emp:
                 response_user["company_name"] = emp["company_name"]
                 response_user["industry"] = emp["industry"]
+                response_user["company_logo"] = emp["company_logo"]
         
         return {
             "status": "success",
@@ -1916,6 +1917,109 @@ def upload_avatar():
         traceback.print_exc()
         return {"error": str(e)}, 500
 
+@app.route("/api/upload/company-logo", methods=["POST"])
+def upload_company_logo():
+    """อัปโหลด Company Logo → Cloudinary"""
+    try:
+        user_id = request.form.get("user_id")
+        if not user_id:
+            return {"error": "user_id is required"}, 400
+        
+        user_id = int(user_id)
+        
+        if "logo" not in request.files:
+            return {"error": "No file provided"}, 400
+        
+        file = request.files["logo"]
+        
+        if file.filename == "":
+            return {"error": "Empty filename"}, 400
+        
+        if not allowed_file(file.filename):
+            return {
+                "error": f"Invalid file type. Allowed: {', '.join(ALLOWED_EXTENSIONS)}"
+            }, 400
+        
+        public_id = f"jobjab/company-logos/user_{user_id}_{uuid.uuid4().hex[:8]}"
+        
+        upload_result = cloudinary.uploader.upload(
+            file,
+            public_id=public_id,
+            transformation=[
+                {"width": 400, "height": 400, "crop": "limit"},
+                {"quality": "auto", "fetch_format": "auto"},
+            ],
+            overwrite=True,
+        )
+        
+        image_url = upload_result["secure_url"]
+        filename = upload_result["public_id"].split("/")[-1]
+        
+        old = db.session.execute(
+            text("SELECT company_logo FROM employer_profiles WHERE user_id = :uid"),
+            {"uid": user_id}
+        ).first()
+        
+        if old and old[0] and "res.cloudinary.com" in old[0]:
+            try:
+                old_public_id = extract_cloudinary_public_id(old[0])
+                if old_public_id:
+                    cloudinary.uploader.destroy(old_public_id)
+            except Exception as e:
+                print(f"Delete old company logo failed: {e}")
+        
+        db.session.execute(
+            text("""
+                UPDATE employer_profiles 
+                SET company_logo = :logo, updated_at = NOW()
+                WHERE user_id = :uid
+            """),
+            {"logo": image_url, "uid": user_id}
+        )
+        db.session.commit()
+        
+        return {
+            "status": "success",
+            "message": "Company logo uploaded successfully",
+            "image_url": image_url,
+            "filename": filename,
+        }, 200
+        
+    except Exception as e:
+        db.session.rollback()
+        print(f"Upload company logo error: {e}")
+        import traceback
+        traceback.print_exc()
+        return {"error": str(e)}, 500
+
+
+@app.route("/api/employer/profile", methods=["GET"])
+def get_employer_profile():
+    """ดูข้อมูล employer profile"""
+    try:
+        user_id = request.args.get("user_id", type=int)
+        if not user_id:
+            return {"error": "user_id is required"}, 400
+        
+        result = db.session.execute(
+            text("""
+                SELECT ep.company_name, ep.industry, ep.company_logo,
+                       u.email, u.full_name, u.phone, u.location, u.bio
+                FROM employer_profiles ep
+                JOIN users u ON u.id = ep.user_id
+                WHERE ep.user_id = :uid
+            """),
+            {"uid": user_id}
+        ).mappings().first()
+        
+        if not result:
+            return {"error": "Employer profile not found"}, 404
+        
+        return {"profile": dict(result)}, 200
+        
+    except Exception as e:
+        print(f"Get employer profile error: {e}")
+        return {"error": str(e)}, 500
 
 # =============================================================================
 # MATCH SCORE (single job)
