@@ -765,13 +765,16 @@ def get_application_detail(application_id):
                     a.resume_filename, a.cover_letter,
                     a.applied_date, a.updated_at,
                     j.job_title, j.company_name, j.location AS job_location,
-                    j.salary_min, j.salary_max, j.employment_type
+                    j.salary_min, j.salary_max, j.employment_type,
+                    u.resume_url AS user_resume_url
                 FROM applications a
                 LEFT JOIN job_market_data j ON a.job_id = j.id
+                LEFT JOIN users u ON a.user_id = u.id
                 WHERE a.id = :application_id
             """),
             {"application_id": application_id}
         )
+        
         application = app_result.mappings().first()
         if not application:
             return {"error": "Application not found"}, 404
@@ -1520,13 +1523,16 @@ def get_job_applications(job_id):
             text("""
                 SELECT 
                     a.id, a.user_id, a.full_name, a.email, a.phone,
-                    a.location, a.status, a.applied_date, a.resume_filename
+                    a.location, a.status, a.applied_date, a.resume_filename,
+                    u.resume_url AS user_resume_url
                 FROM applications a
+                LEFT JOIN users u ON a.user_id = u.id
                 WHERE a.job_id = :jid
                 ORDER BY a.applied_date DESC
             """),
             {"jid": job_id}
         )
+
         rows = result.mappings().all()
         
         applications = []
@@ -1541,6 +1547,7 @@ def get_job_applications(job_id):
                 "status": row["status"] or "applied",
                 "applied_date": row["applied_date"].isoformat() if row["applied_date"] else None,
                 "resume_filename": row["resume_filename"],
+                "user_resume_url": row["user_resume_url"],
             })
         
         return {
@@ -1570,9 +1577,11 @@ def get_application_snapshot(application_id):
                     j.job_title, j.company_name,
                     j.employment_type, j.experience_level,
                     j.location AS job_location,
-                    j.salary_min, j.salary_max
+                    j.salary_min, j.salary_max,
+                    u.resume_url AS user_resume_url
                 FROM applications a
                 LEFT JOIN job_market_data j ON a.job_id = j.id
+                LEFT JOIN users u ON a.user_id = u.id
                 WHERE a.id = :aid
             """),
             {"aid": application_id}
