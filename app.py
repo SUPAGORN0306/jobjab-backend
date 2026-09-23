@@ -1,4 +1,4 @@
-from flask import Flask, render_template, jsonify, request
+from flask import Flask, render_template, jsonify, request, Response
 from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
 from sqlalchemy import text
@@ -9,21 +9,18 @@ import bcrypt
 import re
 import uuid
 from werkzeug.utils import secure_filename
+from werkzeug.exceptions import RequestEntityTooLarge
 
-import cloudinary
-import cloudinary.uploader
-import cloudinary.api
+import requests as http_requests
 
-# =============================================================================
-# CLOUDINARY CONFIG
-# =============================================================================
+load_dotenv()
 
-cloudinary.config(
-    cloud_name=os.getenv("CLOUDINARY_CLOUD_NAME"),
-    api_key=os.getenv("CLOUDINARY_API_KEY"),
-    api_secret=os.getenv("CLOUDINARY_API_SECRET"),
-    secure=True,
-)
+# ⭐ Supabase Storage config
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
+
+if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
+    print("⚠️  Missing SUPABASE_URL or SUPABASE_SERVICE_KEY in .env")
 
 # =============================================================================
 # CONSTANTS
@@ -40,11 +37,7 @@ ALLOWED_JOB_TITLES = {
     'Quant Researcher',
 }
 
-
-load_dotenv()
-
 db = SQLAlchemy()
-
 app = Flask(__name__)
 
 CORS(app, origins=[
@@ -52,17 +45,16 @@ CORS(app, origins=[
     "http://localhost:3000",
     "http://127.0.0.1:5173",
     "https://joblab-one.vercel.app",
-    "https://jobjab-one.vercel.app",  
+    "https://jobjab-one.vercel.app",
     "https://*.vercel.app",
 ])
 
 app.config["SQLALCHEMY_DATABASE_URI"] = os.getenv("DATABASE_URL")
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 
-# แก้ปัญหา Neon SSL connection หลุด
 app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {
-    "pool_pre_ping": True,       # เช็ค connection ก่อนใช้
-    "pool_recycle": 300,          # recycle connection ทุก 5 นาที
+    "pool_pre_ping": True,
+    "pool_recycle": 300,
     "pool_size": 5,
     "max_overflow": 2,
     "connect_args": {
@@ -78,7 +70,7 @@ db.init_app(app)
 # =============================================================================
 
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'webp'}
-ALLOWED_RESUME_EXTENSIONS = {'pdf', 'doc', 'docx'}
+ALLOWED_RESUME_EXTENSIONS = {'pdf'}
 MAX_FILE_SIZE = 5 * 1024 * 1024  # 5 MB
 
 app.config['MAX_CONTENT_LENGTH'] = MAX_FILE_SIZE
@@ -95,11 +87,66 @@ def allowed_resume_file(filename):
 
 
 # =============================================================================
+# SUPABASE STORAGE HELPERS (REST API)
+# =============================================================================
+
+def _sb_headers(content_type=None):
+    """สร้าง headers สำหรับ Supabase REST API"""
+    h = {
+        "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+        "apikey": SUPABASE_SERVICE_KEY,
+    }
+    if content_type:
+        h["Content-Type"] = content_type
+    return h
+
+
+def sb_upload(bucket, path, file_bytes, content_type):
+    """อัปโหลดไฟล์ขึ้น Supabase Storage ผ่าน REST API"""
+    url = f"{SUPABASE_URL}/storage/v1/object/{bucket}/{path}"
+    headers = _sb_headers(content_type)
+    headers["x-upsert"] = "true"
+
+    res = http_requests.post(url, data=file_bytes, headers=headers, timeout=30)
+    return res
+
+
+def sb_delete(bucket, path):
+    """ลบไฟล์ใน Supabase Storage ผ่าน REST API"""
+    url = f"{SUPABASE_URL}/storage/v1/object/{bucket}/{path}"
+    headers = _sb_headers()
+    try:
+        res = http_requests.delete(url, headers=headers, timeout=15)
+        return res
+    except Exception as e:
+        print(f"sb_delete error: {e}")
+        return None
+
+
+def sb_public_url(bucket, path):
+    """สร้าง Public URL ของไฟล์ใน Supabase Storage"""
+    return f"{SUPABASE_URL}/storage/v1/object/public/{bucket}/{path}"
+
+
+def extract_supabase_path(url, bucket):
+    """ดึง path ของไฟล์จาก Supabase public URL"""
+    try:
+        if "supabase.co" not in url:
+            return None
+        marker = f"/{bucket}/"
+        if marker in url:
+            return url.split(marker)[-1]
+        return None
+    except Exception as e:
+        print(f"extract_supabase_path error: {e}")
+        return None
+
+
+# =============================================================================
 # HELPER FUNCTIONS
 # =============================================================================
 
 def format_salary(min_val, max_val):
-    """จัดรูปแบบเงินเดือน"""
     try:
         if min_val is None and max_val is None:
             return "N/A"
@@ -111,14 +158,12 @@ def format_salary(min_val, max_val):
 
 
 def get_company_initial(company_name):
-    """ดึงอักษรแรกของชื่อบริษัท"""
     if not company_name:
         return "J"
     return company_name.strip()[0].upper()
 
 
 def serialize_row(row):
-    """แปลง row ให้เป็น dict ที่ JSON serialize ได้"""
     result = dict(row)
     for key, value in result.items():
         if hasattr(value, 'isoformat'):
@@ -127,10 +172,8 @@ def serialize_row(row):
 
 
 def generate_username_from_email(email, db_session):
-    """สร้าง username จาก email + ถ้าซ้ำเติมตัวเลข"""
     base = email.split("@")[0].lower()
     base = re.sub(r"[^a-z0-9_]", "_", base)
-    
     username = base
     counter = 1
     while True:
@@ -144,24 +187,8 @@ def generate_username_from_email(email, db_session):
         username = f"{base}_{counter}"
 
 
-def extract_cloudinary_public_id(url):
-    """ดึง public_id จาก Cloudinary URL"""
-    try:
-        if "res.cloudinary.com" not in url:
-            return None
-        part = url.split("/upload/")[-1]
-        if part.startswith("v") and "/" in part:
-            part = part.split("/", 1)[1]
-        if "." in part:
-            part = part.rsplit(".", 1)[0]
-        return part
-    except Exception as e:
-        print(f"extract_cloudinary_public_id error: {e}")
-        return None
-
-
 # =============================================================================
-# MATCH SCORE (OPTIMIZED — NO N+1)
+# MATCH SCORE
 # =============================================================================
 
 INDUSTRY_RELATED = {
@@ -176,24 +203,17 @@ INDUSTRY_RELATED = {
 
 
 def load_user_data(user_id, db_session):
-    """
-    โหลดข้อมูล user ทั้งหมดครั้งเดียว (ลด N+1 query)
-    ใช้ครั้งเดียวต่อ request → แทนที่จะ query ทุก job
-    """
     try:
-        # Industry
         user = db_session.execute(
             text("SELECT industry FROM users WHERE id = :uid"),
             {"uid": user_id}
         ).mappings().first()
-        
-        # Skills
+
         skills_result = db_session.execute(
             text("SELECT skill_name FROM user_skills WHERE user_id = :uid"),
             {"uid": user_id}
         ).fetchall()
-        
-        # Total years of experience
+
         exp_result = db_session.execute(
             text("""
                 SELECT 
@@ -207,7 +227,7 @@ def load_user_data(user_id, db_session):
             """),
             {"uid": user_id}
         ).mappings().first()
-        
+
         return {
             "industry": (user["industry"] or "").lower().strip() if user else "",
             "skills": [s[0].lower().strip() for s in skills_result],
@@ -221,19 +241,14 @@ def load_user_data(user_id, db_session):
 
 
 def calculate_match_score_fast(job_row, user_data):
-    """
-    คำนวณ Match Score แบบเร็ว — ใช้ข้อมูล user ที่ preload แล้ว
-    ไม่ query DB → เร็วมาก
-    """
     try:
-        # === 1. SKILLS MATCH ===
         job_skills_raw = (job_row.get("skills_required") or "").lower()
         job_skills = [s.strip() for s in job_skills_raw.split(",") if s.strip()]
         user_skills = user_data["skills"]
-        
+
         matched_skills = []
         missing_skills = []
-        
+
         for js in job_skills:
             matched = False
             for us in user_skills:
@@ -243,24 +258,22 @@ def calculate_match_score_fast(job_row, user_data):
                     break
             if not matched:
                 missing_skills.append(js)
-        
+
         skills_match = round((len(matched_skills) / len(job_skills)) * 100) if job_skills else 0
-        
-        # === 2. EXPERIENCE MATCH ===
+
         total_years = user_data["total_years"]
         level_requirements = {"entry": 0, "junior": 0, "mid": 2, "senior": 5, "lead": 7}
         job_level = (job_row.get("experience_level") or "mid").lower()
         required_years = level_requirements.get(job_level, 2)
-        
+
         if required_years == 0:
             exp_match = 100
         else:
             exp_match = min(round((total_years / required_years) * 100), 100)
-        
-        # === 3. INDUSTRY FIT ===
+
         user_industry = user_data["industry"]
         job_industry = (job_row.get("industry") or "").lower().strip()
-        
+
         if not user_industry or not job_industry:
             industry_match = 50
         elif user_industry == job_industry:
@@ -271,10 +284,9 @@ def calculate_match_score_fast(job_row, user_data):
             industry_match = 75
         else:
             industry_match = 40
-        
-        # === 4. OVERALL ===
+
         overall = round(skills_match * 0.5 + exp_match * 0.3 + industry_match * 0.2)
-        
+
         return {
             "overall": overall,
             "skills_match": skills_match,
@@ -312,7 +324,7 @@ def check_columns():
             ORDER BY table_name, ordinal_position;
         """)
         result = db.session.execute(sql)
-        
+
         tables_data = {}
         for row in result:
             t_name = row.table_name
@@ -320,7 +332,7 @@ def check_columns():
             if t_name not in tables_data:
                 tables_data[t_name] = []
             tables_data[t_name].append(c_info)
-            
+
         return {"database_structure": tables_data}, 200
     except Exception as e:
         return {"error": str(e)}, 500
@@ -344,10 +356,9 @@ def debug_routes():
 
 @app.route("/api/jobs")
 def get_jobs():
-    """ดึงงานทั้งหมด พร้อม Match Score — ใช้ preload ลด N+1"""
     try:
         user_id = request.args.get("user_id", type=int)
-        
+
         result = db.session.execute(text("""
             SELECT 
                 j.id, j.company_name, j.industry, j.job_title,
@@ -361,17 +372,15 @@ def get_jobs():
             ORDER BY j.id
         """))
         rows = result.mappings().all()
-        
-        # ⭐ Preload user data ครั้งเดียว (ไม่ query ซ้ำในแต่ละ job)
+
         user_data = load_user_data(user_id, db.session) if user_id else None
-        
+
         jobs_list = []
         for row in rows:
             job_dict = dict(row)
             count = job_dict.get("applicant_count", 0)
-            
+
             if user_id and user_data:
-                # ⚡ คำนวณเร็ว — ไม่ query DB
                 match = calculate_match_score_fast(job_dict, user_data)
                 match_score = match["overall"]
                 match_breakdown = {
@@ -386,7 +395,7 @@ def get_jobs():
                 match_breakdown = {"skills": 75, "experience": 75, "industry": 75}
                 matched_skills = []
                 missing_skills = []
-            
+
             mapped_job = {
                 "id": job_dict.get("id"),
                 "title": job_dict.get("job_title") or "Unknown Title",
@@ -417,11 +426,11 @@ def get_jobs():
                 "salary_min": job_dict.get("salary_min"),
                 "salary_max": job_dict.get("salary_max"),
             }
-            
+
             jobs_list.append(mapped_job)
-        
+
         return {"jobs": jobs_list}
-        
+
     except Exception as e:
         print(f"ERROR: {e}")
         import traceback
@@ -433,7 +442,7 @@ def get_jobs():
 def get_job_detail(job_id):
     try:
         user_id = request.args.get("user_id", type=int)
-        
+
         result = db.session.execute(
             text("""
                 SELECT 
@@ -449,10 +458,10 @@ def get_job_detail(job_id):
             {"job_id": job_id}
         )
         job = result.mappings().first()
-        
+
         if not job:
             return {"error": "Job not found"}, 404
-        
+
         job_dict = serialize_row(job)
         job_dict["title"] = job_dict.get("job_title")
         job_dict["company"] = job_dict.get("company_name")
@@ -462,9 +471,8 @@ def get_job_detail(job_id):
             job_dict.get("salary_min"),
             job_dict.get("salary_max")
         )
-        
+
         if user_id:
-            # ⚡ ใช้ preload + fast calculator
             user_data = load_user_data(user_id, db.session)
             match = calculate_match_score_fast(job_dict, user_data)
             job_dict["match_score"] = match["overall"]
@@ -480,9 +488,9 @@ def get_job_detail(job_id):
             job_dict["match_breakdown"] = {"skills": 75, "experience": 75, "industry": 75}
             job_dict["matched_skills"] = []
             job_dict["missing_skills"] = []
-        
+
         return {"job": job_dict}
-        
+
     except Exception as e:
         print(f"ERROR: {e}")
         import traceback
@@ -507,10 +515,10 @@ def get_profile(user_id):
             {"user_id": user_id}
         )
         user = result.mappings().first()
-        
+
         if not user:
             return {"error": "User not found"}, 404
-        
+
         return {"profile": serialize_row(user)}
     except Exception as e:
         return {"error": str(e)}, 500
@@ -522,7 +530,7 @@ def get_full_profile(user_id):
         user_result = db.session.execute(
             text("""
                 SELECT id, username, email, full_name, phone, location, 
-                    bio, role, profile_image, industry, resume_url, 
+                    bio, role, profile_image, industry, resume_url, resume_filename,
                     created_at, updated_at
                 FROM users WHERE id = :user_id
             """),
@@ -531,7 +539,7 @@ def get_full_profile(user_id):
         user = user_result.mappings().first()
         if not user:
             return {"error": "User not found"}, 404
-        
+
         skills_result = db.session.execute(
             text("""
                 SELECT id, skill_name, skill_level 
@@ -541,7 +549,7 @@ def get_full_profile(user_id):
             {"user_id": user_id}
         )
         skills = [serialize_row(row) for row in skills_result.mappings().all()]
-        
+
         exp_result = db.session.execute(
             text("""
                 SELECT id, job_title, company_name, location, 
@@ -552,7 +560,7 @@ def get_full_profile(user_id):
             {"user_id": user_id}
         )
         experiences = [serialize_row(row) for row in exp_result.mappings().all()]
-        
+
         edu_result = db.session.execute(
             text("""
                 SELECT id, institution, degree, field_of_study,
@@ -563,14 +571,14 @@ def get_full_profile(user_id):
             {"user_id": user_id}
         )
         educations = [serialize_row(row) for row in edu_result.mappings().all()]
-        
+
         return {
             "profile": serialize_row(user),
             "skills": skills,
             "experiences": experiences,
             "educations": educations
         }, 200
-        
+
     except Exception as e:
         print(f"ERROR: {e}")
         import traceback
@@ -582,10 +590,10 @@ def get_full_profile(user_id):
 def update_profile(user_id):
     try:
         data = request.json
-        
+
         if not data:
             return {"error": "No data provided"}, 400
-        
+
         db.session.execute(
             text("""
                 UPDATE users 
@@ -608,7 +616,7 @@ def update_profile(user_id):
                 "profile_image": data.get("profile_image"),
             }
         )
-        
+
         if "skills" in data:
             db.session.execute(
                 text("DELETE FROM user_skills WHERE user_id = :user_id"),
@@ -629,7 +637,7 @@ def update_profile(user_id):
                         for s in data["skills"]
                     ]
                 )
-        
+
         if "experiences" in data:
             db.session.execute(
                 text("DELETE FROM user_experience WHERE user_id = :user_id"),
@@ -659,7 +667,7 @@ def update_profile(user_id):
                         for e in data["experiences"]
                     ]
                 )
-        
+
         if "educations" in data:
             db.session.execute(
                 text("DELETE FROM user_education WHERE user_id = :user_id"),
@@ -689,10 +697,10 @@ def update_profile(user_id):
                         for ed in data["educations"]
                     ]
                 )
-        
+
         db.session.commit()
         return {"status": "success", "message": "Profile updated successfully"}, 200
-        
+
     except IntegrityError as e:
         db.session.rollback()
         return {"error": "Constraint violation", "detail": str(e)}, 409
@@ -723,7 +731,7 @@ def get_applications():
         """)
         result = db.session.execute(sql)
         rows = result.mappings().all()
-        
+
         return jsonify({
             "applications": [serialize_row(row) for row in rows]
         }), 200
@@ -762,7 +770,7 @@ def get_application_detail(application_id):
                 SELECT 
                     a.id, a.user_id, a.job_id, a.status,
                     a.full_name, a.email, a.phone, a.location,
-                    a.resume_filename, a.cover_letter,
+                    a.resume_filename, a.resume_url, a.cover_letter,
                     a.applied_date, a.updated_at,
                     j.job_title, j.company_name, j.location AS job_location,
                     j.salary_min, j.salary_max, j.employment_type,
@@ -778,7 +786,7 @@ def get_application_detail(application_id):
         application = app_result.mappings().first()
         if not application:
             return {"error": "Application not found"}, 404
-        
+
         skills_result = db.session.execute(
             text("""
                 SELECT skill_name, skill_level 
@@ -787,7 +795,7 @@ def get_application_detail(application_id):
             {"application_id": application_id}
         )
         skills = [serialize_row(row) for row in skills_result.mappings().all()]
-        
+
         exp_result = db.session.execute(
             text("""
                 SELECT job_title, company_name, location,
@@ -798,7 +806,7 @@ def get_application_detail(application_id):
             {"application_id": application_id}
         )
         experiences = [serialize_row(row) for row in exp_result.mappings().all()]
-        
+
         edu_result = db.session.execute(
             text("""
                 SELECT institution, degree, field_of_study,
@@ -809,14 +817,14 @@ def get_application_detail(application_id):
             {"application_id": application_id}
         )
         educations = [serialize_row(row) for row in edu_result.mappings().all()]
-        
+
         return {
             "application": serialize_row(application),
             "skills": skills,
             "experiences": experiences,
             "educations": educations
         }, 200
-        
+
     except Exception as e:
         print(f"ERROR: {e}")
         import traceback
@@ -828,10 +836,10 @@ def get_application_detail(application_id):
 def create_application():
     try:
         data = request.json
-        
+
         if not data:
             return {"error": "No data provided"}, 400
-        
+
         user_id = data.get("user_id")
         job_id = data.get("jobId") or data.get("job_id")
         full_name = data.get("fullName") or data.get("full_name")
@@ -839,29 +847,36 @@ def create_application():
         phone = data.get("phone")
         location = data.get("location", "")
         resume_filename = data.get("resumeFilename") or data.get("resume_filename", "")
+        resume_url = data.get("resumeUrl") or data.get("resume_url", "")
         cover_letter = data.get("coverLetter") or data.get("cover_letter", "")
-        
+
         skills = data.get("skills", [])
         experiences = data.get("experiences", [])
         educations = data.get("educations", [])
-        
+
         if not user_id:
             return {"error": "user_id is required"}, 400
         if not job_id:
             return {"error": "job_id is required"}, 400
         if not full_name or not email:
             return {"error": "full_name and email are required"}, 400
-        
+
+        if user_id == 1:
+            return {"error": "Please login first to submit application"}, 403
+
+        if not resume_url:
+            return {"error": "Please upload a resume first"}, 400
+
         check = db.session.execute(
             text("""
-                SELECT id FROM applications 
+                SELECT id FROM applications
                 WHERE user_id = :user_id AND job_id = :job_id
             """),
             {"user_id": user_id, "job_id": job_id}
         )
         if check.first():
             return {"error": "You have already applied for this position"}, 400
-        
+
         job_check = db.session.execute(
             text("""
                 SELECT id, posted_by_user_id
@@ -875,18 +890,16 @@ def create_application():
             return {"error": "Job not found"}, 404
 
         if job_row[1] and job_row[1] == user_id:
-            return {
-                "error": "You cannot apply to a job that you posted"
-            }, 400
-        
+            return {"error": "You cannot apply to a job that you posted"}, 400
+
         result = db.session.execute(
             text("""
-                INSERT INTO applications 
+                INSERT INTO applications
                     (user_id, job_id, full_name, email, phone, location,
-                     resume_filename, cover_letter, status, applied_date)
-                VALUES 
+                     resume_filename, resume_url, cover_letter, status, applied_date)
+                VALUES
                     (:user_id, :job_id, :full_name, :email, :phone, :location,
-                     :resume_filename, :cover_letter, 'applied', NOW())
+                     :resume_filename, :resume_url, :cover_letter, 'applied', NOW())
                 RETURNING id
             """),
             {
@@ -897,17 +910,18 @@ def create_application():
                 "phone": phone,
                 "location": location,
                 "resume_filename": resume_filename,
+                "resume_url": resume_url,
                 "cover_letter": cover_letter,
             }
         )
         application_id = result.scalar()
-        
+
         if skills:
             db.session.execute(
                 text("""
-                    INSERT INTO application_skills 
+                    INSERT INTO application_skills
                         (application_id, skill_name, skill_level)
-                    VALUES 
+                    VALUES
                         (:application_id, :skill_name, :skill_level)
                 """),
                 [
@@ -919,14 +933,14 @@ def create_application():
                     for s in skills
                 ]
             )
-        
+
         if experiences:
             db.session.execute(
                 text("""
-                    INSERT INTO application_experiences 
+                    INSERT INTO application_experiences
                         (application_id, job_title, company_name, location,
                          start_date, end_date, is_current, description)
-                    VALUES 
+                    VALUES
                         (:application_id, :job_title, :company_name, :location,
                          :start_date, :end_date, :is_current, :description)
                 """),
@@ -944,14 +958,14 @@ def create_application():
                     for e in experiences
                 ]
             )
-        
+
         if educations:
             db.session.execute(
                 text("""
-                    INSERT INTO application_educations 
+                    INSERT INTO application_educations
                         (application_id, institution, degree, field_of_study,
                          start_date, end_date, is_current, gpa)
-                    VALUES 
+                    VALUES
                         (:application_id, :institution, :degree, :field_of_study,
                          :start_date, :end_date, :is_current, :gpa)
                 """),
@@ -969,15 +983,15 @@ def create_application():
                     for ed in educations
                 ]
             )
-        
+
         db.session.commit()
-        
+
         return {
             "status": "success",
             "message": "Application submitted successfully!",
             "application_id": application_id
         }, 201
-        
+
     except IntegrityError as e:
         db.session.rollback()
         return {"error": "Integrity error", "detail": str(e)}, 409
@@ -996,18 +1010,33 @@ def create_application():
 @app.route("/api/favorites")
 def get_favorites():
     try:
-        result = db.session.execute(text("""
-            SELECT 
-                f.id, f.user_id, f.job_id,
-                j.job_title, j.company_name,
-                f.created_at
-            FROM favorites f
-            LEFT JOIN job_market_data j ON f.job_id = j.id
-            ORDER BY f.id
-        """))
+        user_id = request.args.get("user_id", type=int)
+
+        if not user_id:
+            return {"error": "user_id is required"}, 400
+
+        if user_id == 1:
+            return {"favorites": []}
+
+        result = db.session.execute(
+            text("""
+                SELECT 
+                    f.id, f.user_id, f.job_id, f.created_at,
+                    j.job_title, j.company_name, j.location,
+                    j.salary_min, j.salary_max, j.industry,
+                    j.experience_level, j.employment_type,
+                    j.skills_required
+                FROM favorites f
+                LEFT JOIN job_market_data j ON f.job_id = j.id
+                WHERE f.user_id = :user_id
+                ORDER BY f.created_at DESC
+            """),
+            {"user_id": user_id}
+        )
         rows = result.mappings().all()
         return {"favorites": [serialize_row(row) for row in rows]}
     except Exception as e:
+        print(f"Get favorites error: {e}")
         return {"error": str(e)}, 500
 
 
@@ -1016,14 +1045,29 @@ def toggle_favorite():
     data = request.json
     user_id = data.get("user_id")
     job_id = data.get("job_id")
-    
+
+    if not user_id:
+        return {"error": "user_id is required"}, 400
+    if not job_id:
+        return {"error": "job_id is required"}, 400
+
+    if user_id == 1:
+        return {"error": "Please login first to save favorites"}, 403
+
     try:
+        job_check = db.session.execute(
+            text("SELECT id FROM job_market_data WHERE id = :jid"),
+            {"jid": job_id}
+        ).first()
+        if not job_check:
+            return {"error": "Job not found"}, 404
+
         check = db.session.execute(
             text("SELECT id FROM favorites WHERE user_id = :user_id AND job_id = :job_id"),
             {"user_id": user_id, "job_id": job_id}
         )
         existing = check.first()
-        
+
         if existing:
             db.session.execute(
                 text("DELETE FROM favorites WHERE user_id = :user_id AND job_id = :job_id"),
@@ -1038,9 +1082,10 @@ def toggle_favorite():
             )
             db.session.commit()
             return {"favorited": True, "message": "Added to favorites"}
-            
+
     except Exception as e:
         db.session.rollback()
+        print(f"Toggle favorite error: {e}")
         return {"error": str(e)}, 500
 
 
@@ -1052,39 +1097,45 @@ def toggle_favorite():
 def auth_register():
     try:
         data = request.json
-        
+
         full_name = (data.get("full_name") or "").strip()
         email = (data.get("email") or "").strip().lower()
         password = data.get("password") or ""
         role = (data.get("role") or "candidate").lower()
         company_name = (data.get("company_name") or "").strip()
         industry = (data.get("industry") or "").strip()
-        
+
         if not email or not password:
             return {"error": "Email and password are required"}, 400
-        
-        if len(password) < 6:
-            return {"error": "Password must be at least 6 characters"}, 400
-        
+
+        if len(password) < 8:
+            return {"error": "Password must be at least 8 characters"}, 400
+
+        if not re.search(r'[a-zA-Z]', password):
+            return {"error": "Password must contain at least one letter"}, 400
+
+        if not re.search(r'[0-9]', password):
+            return {"error": "Password must contain at least one number"}, 400
+
         if role not in ("candidate", "employer"):
             return {"error": "Invalid role"}, 400
-        
+
         if role == "employer" and not company_name:
             return {"error": "Company name is required for employer"}, 400
-        
+
         existing = db.session.execute(
             text("SELECT id FROM users WHERE email = :e"),
             {"e": email}
         ).first()
         if existing:
             return {"error": "Email already registered. Please login first to add a new role."}, 409
-        
+
         username = generate_username_from_email(email, db.session)
-        
+
         password_bytes = password.encode("utf-8")
         salt = bcrypt.gensalt(rounds=12)
         password_hash = bcrypt.hashpw(password_bytes, salt).decode("utf-8")
-        
+
         result = db.session.execute(
             text("""
                 INSERT INTO users 
@@ -1103,7 +1154,7 @@ def auth_register():
         )
         user_row = result.mappings().first()
         user_id = user_row["id"]
-        
+
         db.session.execute(
             text("""
                 INSERT INTO user_roles (user_id, role, created_at)
@@ -1111,7 +1162,7 @@ def auth_register():
             """),
             {"user_id": user_id, "role": role}
         )
-        
+
         if role == "employer":
             db.session.execute(
                 text("""
@@ -1126,9 +1177,9 @@ def auth_register():
                     "industry": industry or None,
                 }
             )
-        
+
         db.session.commit()
-        
+
         return {
             "status": "success",
             "message": "Account created successfully",
@@ -1141,7 +1192,7 @@ def auth_register():
                 "role": role,
             }
         }, 201
-        
+
     except IntegrityError as e:
         db.session.rollback()
         return {"error": "Integrity error", "detail": str(e)}, 409
@@ -1159,10 +1210,11 @@ def auth_login():
         data = request.json
         email = (data.get("email") or "").strip().lower()
         password = data.get("password") or ""
-        
+        requested_role = (data.get("role") or "").lower()
+
         if not email or not password:
             return {"error": "Email and password are required"}, 400
-        
+
         result = db.session.execute(
             text("""
                 SELECT id, username, email, password_hash, full_name
@@ -1171,16 +1223,16 @@ def auth_login():
             {"e": email}
         )
         user = result.mappings().first()
-        
+
         if not user:
             return {"error": "Invalid email or password"}, 401
-        
+
         password_bytes = password.encode("utf-8")
         hash_bytes = user["password_hash"].encode("utf-8")
-        
+
         if not bcrypt.checkpw(password_bytes, hash_bytes):
             return {"error": "Invalid email or password"}, 401
-        
+
         roles_result = db.session.execute(
             text("""
                 SELECT role FROM user_roles 
@@ -1190,19 +1242,24 @@ def auth_login():
             {"uid": user["id"]}
         )
         roles = [row[0] for row in roles_result]
-        
+
         if not roles:
             roles = ["candidate"]
-        
+
+        if requested_role and requested_role in roles:
+            selected_role = requested_role
+        else:
+            selected_role = roles[0]
+
         response_user = {
             "id": user["id"],
             "username": user["username"],
             "email": user["email"],
             "full_name": user["full_name"],
             "roles": roles,
-            "role": roles[0] if len(roles) == 1 else None,
+            "role": selected_role,
         }
-        
+
         if "employer" in roles:
             emp_result = db.session.execute(
                 text("""
@@ -1216,13 +1273,13 @@ def auth_login():
                 response_user["company_name"] = emp["company_name"]
                 response_user["industry"] = emp["industry"]
                 response_user["company_logo"] = emp["company_logo"]
-        
+
         return {
             "status": "success",
             "message": "Login successful",
             "user": response_user
         }, 200
-        
+
     except Exception as e:
         print(f"Login error: {e}")
         import traceback
@@ -1238,31 +1295,31 @@ def auth_add_role():
         role = (data.get("role") or "").lower()
         company_name = (data.get("company_name") or "").strip()
         industry = (data.get("industry") or "").strip()
-        
+
         if not user_id or not role:
             return {"error": "user_id and role required"}, 400
-        
+
         if role not in ("candidate", "employer"):
             return {"error": "Invalid role"}, 400
-        
+
         if role == "employer" and not company_name:
             return {"error": "Company name is required"}, 400
-        
+
         user_check = db.session.execute(
             text("SELECT id, email FROM users WHERE id = :uid"),
             {"uid": user_id}
         ).first()
         if not user_check:
             return {"error": "User not found"}, 404
-        
+
         existing = db.session.execute(
             text("SELECT id FROM user_roles WHERE user_id = :uid AND role = :r"),
             {"uid": user_id, "r": role}
         ).first()
-        
+
         if existing:
             return {"error": f"Role '{role}' already exists for this user"}, 409
-        
+
         db.session.execute(
             text("""
                 INSERT INTO user_roles (user_id, role, created_at)
@@ -1270,13 +1327,13 @@ def auth_add_role():
             """),
             {"uid": user_id, "r": role}
         )
-        
+
         if role == "employer":
             existing_profile = db.session.execute(
                 text("SELECT id FROM employer_profiles WHERE user_id = :uid"),
                 {"uid": user_id}
             ).first()
-            
+
             if not existing_profile:
                 db.session.execute(
                     text("""
@@ -1286,14 +1343,14 @@ def auth_add_role():
                     """),
                     {"uid": user_id, "cn": company_name, "ind": industry or None}
                 )
-        
+
         db.session.commit()
-        
+
         return {
             "status": "success",
             "message": f"Role '{role}' added successfully"
         }, 201
-        
+
     except IntegrityError as e:
         db.session.rollback()
         return {"error": "Integrity error", "detail": str(e)}, 409
@@ -1319,7 +1376,7 @@ def all_tables_data():
             ORDER BY table_name
         """))
         tables = [row[0] for row in tables_result]
-        
+
         result = {}
         for table_name in tables:
             try:
@@ -1327,7 +1384,7 @@ def all_tables_data():
                     text(f"SELECT * FROM {table_name} ORDER BY 1")
                 )
                 rows = data_result.mappings().all()
-                
+
                 result[table_name] = {
                     "columns": list(rows[0].keys()) if rows else [],
                     "data": [serialize_row(row) for row in rows]
@@ -1338,7 +1395,7 @@ def all_tables_data():
                     "data": [],
                     "error": str(e)
                 }
-        
+
         return result
     except Exception as e:
         return {"error": str(e)}, 500
@@ -1362,10 +1419,10 @@ def tables_page():
 def get_employer_jobs():
     try:
         user_id = request.args.get("user_id", type=int)
-        
+
         if not user_id:
             return {"error": "user_id is required"}, 400
-        
+
         result = db.session.execute(
             text("""
                 SELECT 
@@ -1388,7 +1445,7 @@ def get_employer_jobs():
             {"user_id": user_id}
         )
         rows = result.mappings().all()
-        
+
         jobs = []
         for row in rows:
             jobs.append({
@@ -1404,9 +1461,9 @@ def get_employer_jobs():
                 "applicant_count": row["applicant_count"],
                 "status": "Active",
             })
-        
+
         return {"jobs": jobs}, 200
-        
+
     except Exception as e:
         print(f"Get employer jobs error: {e}")
         import traceback
@@ -1418,7 +1475,7 @@ def get_employer_jobs():
 def create_employer_job():
     try:
         data = request.json
-        
+
         user_id = data.get("user_id")
         job_title = (data.get("job_title") or "").strip()
         company_name = (data.get("company_name") or "").strip()
@@ -1434,7 +1491,7 @@ def create_employer_job():
         about_role = (data.get("about_role") or "").strip()
         responsibilities = (data.get("responsibilities") or "").strip()
         requirements = (data.get("requirements") or "").strip()
-        
+
         if not user_id:
             return {"error": "user_id is required"}, 400
         if not job_title:
@@ -1448,7 +1505,7 @@ def create_employer_job():
             }, 400
         if not company_name:
             return {"error": "Company name is required"}, 400
-        
+
         check = db.session.execute(
             text("""
                 SELECT 1 FROM user_roles 
@@ -1456,10 +1513,10 @@ def create_employer_job():
             """),
             {"uid": user_id}
         ).first()
-        
+
         if not check:
             return {"error": "User is not an employer"}, 403
-        
+
         result = db.session.execute(
             text("""
                 INSERT INTO job_market_data (
@@ -1500,15 +1557,15 @@ def create_employer_job():
             }
         )
         job_id = result.scalar()
-        
+
         db.session.commit()
-        
+
         return {
             "status": "success",
             "message": "Job posted successfully",
             "job_id": job_id,
         }, 201
-        
+
     except IntegrityError as e:
         db.session.rollback()
         return {"error": "Integrity error", "detail": str(e)}, 409
@@ -1529,12 +1586,13 @@ def get_job_applications(job_id):
         ).first()
         if not job_check:
             return {"error": "Job not found"}, 404
-        
+
         result = db.session.execute(
             text("""
                 SELECT 
                     a.id, a.user_id, a.full_name, a.email, a.phone,
                     a.location, a.status, a.applied_date, a.resume_filename,
+                    a.resume_url,
                     u.resume_url AS user_resume_url
                 FROM applications a
                 LEFT JOIN users u ON a.user_id = u.id
@@ -1545,7 +1603,7 @@ def get_job_applications(job_id):
         )
 
         rows = result.mappings().all()
-        
+
         applications = []
         for row in rows:
             applications.append({
@@ -1558,16 +1616,17 @@ def get_job_applications(job_id):
                 "status": row["status"] or "applied",
                 "applied_date": row["applied_date"].isoformat() if row["applied_date"] else None,
                 "resume_filename": row["resume_filename"],
+                "resume_url": row["resume_url"],
                 "user_resume_url": row["user_resume_url"],
             })
-        
+
         return {
             "job_id": job_id,
             "job_title": job_check[1],
             "applications": applications,
             "total": len(applications),
         }, 200
-        
+
     except Exception as e:
         print(f"Get job applications error: {e}")
         import traceback
@@ -1583,7 +1642,7 @@ def get_application_snapshot(application_id):
                 SELECT 
                     a.id, a.user_id, a.job_id, a.status,
                     a.full_name, a.email, a.phone, a.location,
-                    a.resume_filename, a.cover_letter,
+                    a.resume_filename, a.resume_url, a.cover_letter,
                     a.applied_date, a.updated_at,
                     j.job_title, j.company_name,
                     j.employment_type, j.experience_level,
@@ -1600,7 +1659,7 @@ def get_application_snapshot(application_id):
         application = app_result.mappings().first()
         if not application:
             return {"error": "Application not found"}, 404
-        
+
         skills_result = db.session.execute(
             text("""
                 SELECT skill_name, skill_level 
@@ -1610,7 +1669,7 @@ def get_application_snapshot(application_id):
             {"aid": application_id}
         )
         skills = [serialize_row(row) for row in skills_result.mappings().all()]
-        
+
         exp_result = db.session.execute(
             text("""
                 SELECT job_title, company_name, location,
@@ -1621,7 +1680,7 @@ def get_application_snapshot(application_id):
             {"aid": application_id}
         )
         experiences = [serialize_row(row) for row in exp_result.mappings().all()]
-        
+
         edu_result = db.session.execute(
             text("""
                 SELECT institution, degree, field_of_study,
@@ -1632,14 +1691,14 @@ def get_application_snapshot(application_id):
             {"aid": application_id}
         )
         educations = [serialize_row(row) for row in edu_result.mappings().all()]
-        
+
         return {
             "application": serialize_row(application),
             "skills": skills,
             "experiences": experiences,
             "educations": educations,
         }, 200
-        
+
     except Exception as e:
         print(f"Get application detail error: {e}")
         import traceback
@@ -1652,18 +1711,18 @@ def update_application_status(application_id):
     try:
         data = request.json
         new_status = (data.get("status") or "").lower()
-        
+
         allowed = {"applied", "reviewing", "interview", "rejected"}
         if new_status not in allowed:
             return {"error": f"Invalid status. Allowed: {', '.join(allowed)}"}, 400
-        
+
         check = db.session.execute(
             text("SELECT id, status FROM applications WHERE id = :aid"),
             {"aid": application_id}
         ).first()
         if not check:
             return {"error": "Application not found"}, 404
-        
+
         db.session.execute(
             text("""
                 UPDATE applications 
@@ -1672,16 +1731,16 @@ def update_application_status(application_id):
             """),
             {"status": new_status, "aid": application_id}
         )
-        
+
         db.session.commit()
-        
+
         return {
             "status": "success",
             "message": f"Status updated to '{new_status}'",
             "application_id": application_id,
             "new_status": new_status,
         }, 200
-        
+
     except Exception as e:
         db.session.rollback()
         print(f"Update status error: {e}")
@@ -1706,7 +1765,7 @@ def get_skills():
             """)
         )
         db_skills = [row[0] for row in result]
-        
+
         default_skills = [
             "Python", "JavaScript", "TypeScript", "Java", "C++", "Go", "Rust",
             "React", "Vue", "Angular", "Node.js", "Express", "Django", "Flask",
@@ -1719,84 +1778,90 @@ def get_skills():
             "Computer Vision", "Data Visualization", "Tableau", "Power BI",
             "Statistics", "A/B Testing", "Excel",
         ]
-        
+
         all_skills = sorted(set(db_skills + default_skills))
-        
+
         return {"skills": all_skills}, 200
     except Exception as e:
         return {"error": str(e)}, 500
 
 
 # =============================================================================
-# UPLOAD: Resume (Cloudinary)
+# UPLOAD: Resume → Supabase Storage
 # =============================================================================
 
 @app.route("/api/upload/resume", methods=["POST"])
 def upload_resume():
-    """อัปโหลด Resume → Cloudinary"""
+    """อัปโหลด Resume (PDF เท่านั้น) → Supabase Storage"""
     try:
         user_id = request.form.get("user_id")
         if not user_id:
             return {"error": "user_id is required"}, 400
-        
+
         user_id = int(user_id)
-        
+
         if "resume" not in request.files:
             return {"error": "No file provided"}, 400
-        
+
         file = request.files["resume"]
-        
+
         if file.filename == "":
             return {"error": "Empty filename"}, 400
-        
+
         if not allowed_resume_file(file.filename):
-            return {
-                "error": f"Invalid file type. Allowed: {', '.join(ALLOWED_RESUME_EXTENSIONS)}"
-            }, 400
-        
-        ext = file.filename.rsplit(".", 1)[1].lower()
-        public_id = f"jobjab/resumes/resume_user_{user_id}_{uuid.uuid4().hex[:8]}.{ext}"
-        
-        upload_result = cloudinary.uploader.upload(
-            file,
-            public_id=public_id,
-            resource_type="raw",
-            overwrite=True,
-        )
-        
-        resume_url = upload_result["secure_url"]
-        filename = upload_result["public_id"].split("/")[-1] + "." + ext
-        
+            return {"error": "Only PDF files are allowed for resume"}, 400
+
+        # ⭐ เก็บชื่อไฟล์จริง
+        original_filename = file.filename
+        safe_filename = secure_filename(original_filename) or f"resume_{user_id}.pdf"
+        if not safe_filename.lower().endswith(".pdf"):
+            safe_filename += ".pdf"
+
+        # สร้างชื่อใน Supabase
+        storage_filename = f"resume_user_{user_id}_{uuid.uuid4().hex[:8]}.pdf"
+        file_bytes = file.read()
+
+        # ลบไฟล์เก่าใน Supabase
         old = db.session.execute(
             text("SELECT resume_url FROM users WHERE id = :uid"),
             {"uid": user_id}
         ).first()
-        
-        if old and old[0] and "res.cloudinary.com" in old[0]:
-            try:
-                old_public_id = extract_cloudinary_public_id(old[0])
-                if old_public_id:
-                    cloudinary.uploader.destroy(old_public_id, resource_type="raw")
-            except Exception as e:
-                print(f"Delete old resume from Cloudinary failed: {e}")
-        
+
+        if old and old[0] and "supabase.co" in old[0]:
+            old_path = extract_supabase_path(old[0], "resumes")
+            if old_path:
+                sb_delete("resumes", old_path)
+
+        # ⭐ อัปโหลดผ่าน REST API
+        upload_res = sb_upload("resumes", storage_filename, file_bytes, "application/pdf")
+
+        if upload_res.status_code not in (200, 201):
+            print(f"Supabase upload failed: {upload_res.status_code} - {upload_res.text}")
+            return {"error": f"Upload failed: {upload_res.text}"}, 500
+
+        # Public URL
+        resume_url = sb_public_url("resumes", storage_filename)
+
+        # บันทึก DB
         db.session.execute(
             text("""
                 UPDATE users 
-                SET resume_url = :url, updated_at = NOW()
+                SET resume_url = :url, 
+                    resume_filename = :filename,
+                    updated_at = NOW()
                 WHERE id = :uid
             """),
-            {"url": resume_url, "uid": user_id}
+            {"url": resume_url, "filename": safe_filename, "uid": user_id}
         )
         db.session.commit()
-        
+
         return {
             "status": "success",
             "message": "Resume uploaded successfully",
             "resume_url": resume_url,
-            "filename": filename,
+            "filename": safe_filename,
         }, 200
-        
+
     except Exception as e:
         db.session.rollback()
         print(f"Upload resume error: {e}")
@@ -1807,41 +1872,35 @@ def upload_resume():
 
 @app.route("/api/resume/<int:user_id>", methods=["DELETE"])
 def delete_resume(user_id):
-    """ลบ Resume (จาก Cloudinary + DB)"""
+    """ลบ Resume (จาก Supabase + DB)"""
     try:
         old = db.session.execute(
             text("SELECT resume_url FROM users WHERE id = :uid"),
             {"uid": user_id}
         ).first()
-        
+
         if not old or not old[0]:
             return {"error": "No resume to delete"}, 404
-        
-        old_url = old[0]
-        
-        if "res.cloudinary.com" in old_url:
-            try:
-                old_public_id = extract_cloudinary_public_id(old_url)
-                if old_public_id:
-                    cloudinary.uploader.destroy(old_public_id, resource_type="raw")
-            except Exception as e:
-                print(f"Delete from Cloudinary failed: {e}")
-        
+
+        if "supabase.co" in old[0]:
+            old_path = extract_supabase_path(old[0], "resumes")
+            if old_path:
+                sb_delete("resumes", old_path)
+
         db.session.execute(
             text("""
                 UPDATE users 
-                SET resume_url = NULL, updated_at = NOW()
+                SET resume_url = NULL, 
+                    resume_filename = NULL,
+                    updated_at = NOW()
                 WHERE id = :uid
             """),
             {"uid": user_id}
         )
         db.session.commit()
-        
-        return {
-            "status": "success",
-            "message": "Resume deleted successfully"
-        }, 200
-        
+
+        return {"status": "success", "message": "Resume deleted successfully"}, 200
+
     except Exception as e:
         db.session.rollback()
         print(f"Delete resume error: {e}")
@@ -1849,60 +1908,60 @@ def delete_resume(user_id):
 
 
 # =============================================================================
-# UPLOAD: Avatar (Cloudinary)
+# UPLOAD: Avatar → Supabase Storage
 # =============================================================================
 
 @app.route("/api/upload/avatar", methods=["POST"])
 def upload_avatar():
-    """อัปโหลด Avatar → Cloudinary"""
+    """อัปโหลด Avatar → Supabase Storage"""
     try:
         user_id = request.form.get("user_id")
         if not user_id:
             return {"error": "user_id is required"}, 400
-        
+
         user_id = int(user_id)
-        
+
         if "avatar" not in request.files:
             return {"error": "No file provided"}, 400
-        
+
         file = request.files["avatar"]
-        
+
         if file.filename == "":
             return {"error": "Empty filename"}, 400
-        
+
         if not allowed_file(file.filename):
             return {
                 "error": f"Invalid file type. Allowed: {', '.join(ALLOWED_EXTENSIONS)}"
             }, 400
-        
-        public_id = f"jobjab/avatars/user_{user_id}_{uuid.uuid4().hex[:8]}"
-        
-        upload_result = cloudinary.uploader.upload(
-            file,
-            public_id=public_id,
-            transformation=[
-                {"width": 500, "height": 500, "crop": "limit"},
-                {"quality": "auto", "fetch_format": "auto"},
-            ],
-            overwrite=True,
-        )
-        
-        image_url = upload_result["secure_url"]
-        filename = upload_result["public_id"].split("/")[-1]
-        
+
+        # ⭐ สร้างชื่อไฟล์
+        ext = file.filename.rsplit(".", 1)[1].lower()
+        storage_filename = f"avatar_user_{user_id}_{uuid.uuid4().hex[:8]}.{ext}"
+        file_bytes = file.read()
+        content_type = file.content_type or "image/jpeg"
+
+        # ⭐ ลบไฟล์เก่า
         old = db.session.execute(
             text("SELECT profile_image FROM users WHERE id = :uid"),
             {"uid": user_id}
         ).first()
-        
-        if old and old[0] and "res.cloudinary.com" in old[0]:
-            try:
-                old_public_id = extract_cloudinary_public_id(old[0])
-                if old_public_id:
-                    cloudinary.uploader.destroy(old_public_id)
-            except Exception as e:
-                print(f"Delete old avatar failed: {e}")
-        
+
+        if old and old[0] and "supabase.co" in old[0]:
+            old_path = extract_supabase_path(old[0], "avatars")
+            if old_path:
+                sb_delete("avatars", old_path)
+
+        # ⭐ อัปโหลดผ่าน REST API
+        upload_res = sb_upload("avatars", storage_filename, file_bytes, content_type)
+
+        if upload_res.status_code not in (200, 201):
+            print(f"Supabase upload failed: {upload_res.status_code} - {upload_res.text}")
+            return {"error": f"Upload failed: {upload_res.text}"}, 500
+
+        # ⭐ Public URL
+        image_url = sb_public_url("avatars", storage_filename)
+
+        # ⭐ บันทึก DB
         db.session.execute(
             text("""
                 UPDATE users 
@@ -1912,14 +1971,14 @@ def upload_avatar():
             {"img": image_url, "uid": user_id}
         )
         db.session.commit()
-        
+
         return {
             "status": "success",
             "message": "Avatar uploaded successfully",
             "image_url": image_url,
-            "filename": filename,
+            "filename": storage_filename,
         }, 200
-        
+
     except Exception as e:
         db.session.rollback()
         print(f"Upload avatar error: {e}")
@@ -1927,57 +1986,60 @@ def upload_avatar():
         traceback.print_exc()
         return {"error": str(e)}, 500
 
+
+# =============================================================================
+# UPLOAD: Company Logo → Supabase Storage
+# =============================================================================
+
 @app.route("/api/upload/company-logo", methods=["POST"])
 def upload_company_logo():
-    """อัปโหลด Company Logo → Cloudinary"""
+    """อัปโหลด Company Logo → Supabase Storage"""
     try:
         user_id = request.form.get("user_id")
         if not user_id:
             return {"error": "user_id is required"}, 400
-        
+
         user_id = int(user_id)
-        
+
         if "logo" not in request.files:
             return {"error": "No file provided"}, 400
-        
+
         file = request.files["logo"]
-        
+
         if file.filename == "":
             return {"error": "Empty filename"}, 400
-        
+
         if not allowed_file(file.filename):
             return {
                 "error": f"Invalid file type. Allowed: {', '.join(ALLOWED_EXTENSIONS)}"
             }, 400
-        
-        public_id = f"jobjab/company-logos/user_{user_id}_{uuid.uuid4().hex[:8]}"
-        
-        upload_result = cloudinary.uploader.upload(
-            file,
-            public_id=public_id,
-            transformation=[
-                {"width": 400, "height": 400, "crop": "limit"},
-                {"quality": "auto", "fetch_format": "auto"},
-            ],
-            overwrite=True,
-        )
-        
-        image_url = upload_result["secure_url"]
-        filename = upload_result["public_id"].split("/")[-1]
-        
+
+        ext = file.filename.rsplit(".", 1)[1].lower()
+        storage_filename = f"logo_user_{user_id}_{uuid.uuid4().hex[:8]}.{ext}"
+        file_bytes = file.read()
+        content_type = file.content_type or "image/jpeg"
+
+        # ⭐ ลบไฟล์เก่า
         old = db.session.execute(
             text("SELECT company_logo FROM employer_profiles WHERE user_id = :uid"),
             {"uid": user_id}
         ).first()
-        
-        if old and old[0] and "res.cloudinary.com" in old[0]:
-            try:
-                old_public_id = extract_cloudinary_public_id(old[0])
-                if old_public_id:
-                    cloudinary.uploader.destroy(old_public_id)
-            except Exception as e:
-                print(f"Delete old company logo failed: {e}")
-        
+
+        if old and old[0] and "supabase.co" in old[0]:
+            old_path = extract_supabase_path(old[0], "company-logos")
+            if old_path:
+                sb_delete("company-logos", old_path)
+
+        # ⭐ อัปโหลดผ่าน REST API
+        upload_res = sb_upload("company-logos", storage_filename, file_bytes, content_type)
+
+        if upload_res.status_code not in (200, 201):
+            print(f"Supabase upload failed: {upload_res.status_code} - {upload_res.text}")
+            return {"error": f"Upload failed: {upload_res.text}"}, 500
+
+        image_url = sb_public_url("company-logos", storage_filename)
+
+        # ⭐ บันทึก DB
         db.session.execute(
             text("""
                 UPDATE employer_profiles 
@@ -1987,14 +2049,14 @@ def upload_company_logo():
             {"logo": image_url, "uid": user_id}
         )
         db.session.commit()
-        
+
         return {
             "status": "success",
             "message": "Company logo uploaded successfully",
             "image_url": image_url,
-            "filename": filename,
+            "filename": storage_filename,
         }, 200
-        
+
     except Exception as e:
         db.session.rollback()
         print(f"Upload company logo error: {e}")
@@ -2005,12 +2067,11 @@ def upload_company_logo():
 
 @app.route("/api/employer/profile", methods=["GET"])
 def get_employer_profile():
-    """ดูข้อมูล employer profile"""
     try:
         user_id = request.args.get("user_id", type=int)
         if not user_id:
             return {"error": "user_id is required"}, 400
-        
+
         result = db.session.execute(
             text("""
                 SELECT ep.company_name, ep.industry, ep.company_logo,
@@ -2021,15 +2082,16 @@ def get_employer_profile():
             """),
             {"uid": user_id}
         ).mappings().first()
-        
+
         if not result:
             return {"error": "Employer profile not found"}, 404
-        
+
         return {"profile": dict(result)}, 200
-        
+
     except Exception as e:
         print(f"Get employer profile error: {e}")
         return {"error": str(e)}, 500
+
 
 # =============================================================================
 # MATCH SCORE (single job)
@@ -2041,8 +2103,7 @@ def get_match_score(job_id):
         user_id = request.args.get("user_id", type=int)
         if not user_id:
             return {"error": "user_id is required"}, 400
-        
-        # Load job info
+
         job = db.session.execute(
             text("""
                 SELECT id, skills_required, experience_level, industry
@@ -2050,10 +2111,10 @@ def get_match_score(job_id):
             """),
             {"jid": job_id}
         ).mappings().first()
-        
+
         if not job:
             return {"error": "Job not found"}, 404
-        
+
         user_data = load_user_data(user_id, db.session)
         match = calculate_match_score_fast(dict(job), user_data)
         return match, 200
@@ -2062,9 +2123,27 @@ def get_match_score(job_id):
 
 
 # =============================================================================
+# ERROR HANDLERS
+# =============================================================================
+
+@app.errorhandler(RequestEntityTooLarge)
+def handle_file_too_large(e):
+    return {"error": "File too large. Maximum size is 5MB."}, 413
+
+
+# =============================================================================
 # MAIN
 # =============================================================================
 
 if __name__ == "__main__":
+    required = [
+        "DATABASE_URL",
+        "SUPABASE_URL",
+        "SUPABASE_SERVICE_KEY",
+    ]
+    missing = [k for k in required if not os.getenv(k)]
+    if missing:
+        print(f"⚠️  Missing env vars: {missing}")
+
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
