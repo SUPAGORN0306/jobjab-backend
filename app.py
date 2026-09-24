@@ -1,5 +1,4 @@
 from flask import Flask, render_template, jsonify, request, Response
-from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
@@ -14,6 +13,12 @@ from werkzeug.exceptions import RequestEntityTooLarge
 import requests as http_requests
 
 load_dotenv()
+
+# ---------- Sprint 1: Security Extensions ----------
+from config import settings
+from extensions import db, jwt, limiter, csrf, migrate
+from logging_config import setup_logging, get_logger
+from auth import auth_bp
 
 # ⭐ Supabase Storage config
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -37,7 +42,6 @@ ALLOWED_JOB_TITLES = {
     'Quant Researcher',
 }
 
-db = SQLAlchemy()
 app = Flask(__name__)
 
 CORS(app, origins=[
@@ -64,6 +68,43 @@ app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {
 }
 
 db.init_app(app)
+
+# =============================================================================
+# SPRINT 1: EXTENSIONS + JWT + LOGGING
+# =============================================================================
+
+# ---------- JWT config ----------
+app.config["JWT_SECRET_KEY"] = settings.JWT_SECRET_KEY
+app.config["JWT_ACCESS_TOKEN_EXPIRES"] = settings.JWT_ACCESS_TOKEN_EXPIRES_MINUTES * 60
+app.config["JWT_REFRESH_TOKEN_EXPIRES"] = settings.JWT_REFRESH_TOKEN_EXPIRES_DAYS * 24 * 3600
+app.config["JWT_TOKEN_LOCATION"] = ["cookies", "headers"]
+app.config["JWT_COOKIE_SECURE"] = settings.cookie_secure
+app.config["JWT_COOKIE_SAMESITE"] = "None" if settings.cookie_secure else "Lax"
+app.config["JWT_COOKIE_CSRF_PROTECT"] = False  # เราจัดการ CSRF เอง
+
+# ---------- Cookie names (ต้องตรงกับ cookies.py) ----------
+app.config["JWT_ACCESS_COOKIE_NAME"] = "access_token"
+app.config["JWT_REFRESH_COOKIE_NAME"] = "refresh_token"
+app.config["JWT_ACCESS_COOKIE_PATH"] = "/"
+app.config["JWT_REFRESH_COOKIE_PATH"] = "/api/auth"
+
+# ---------- Init extensions ----------
+migrate.init_app(app, db)
+jwt.init_app(app)
+limiter.init_app(app)
+csrf.init_app(app)
+
+# Exempt auth blueprint จาก Flask-WTF CSRF (ใช้ JWT CSRF แทน)
+csrf.exempt(auth_bp)
+
+# ---------- Logging ----------
+setup_logging()
+logger = get_logger(__name__)
+
+# ---------- Register blueprints ----------
+app.register_blueprint(auth_bp)
+
+logger.info("app_initialized", env=settings.ENV)
 
 # =============================================================================
 # UPLOAD CONFIG
@@ -1092,200 +1133,6 @@ def toggle_favorite():
 # =============================================================================
 # AUTH
 # =============================================================================
-
-@app.route("/api/auth/register", methods=["POST"])
-def auth_register():
-    try:
-        data = request.json
-
-        full_name = (data.get("full_name") or "").strip()
-        email = (data.get("email") or "").strip().lower()
-        password = data.get("password") or ""
-        role = (data.get("role") or "candidate").lower()
-        company_name = (data.get("company_name") or "").strip()
-        industry = (data.get("industry") or "").strip()
-
-        if not email or not password:
-            return {"error": "Email and password are required"}, 400
-
-        if len(password) < 8:
-            return {"error": "Password must be at least 8 characters"}, 400
-
-        if not re.search(r'[a-zA-Z]', password):
-            return {"error": "Password must contain at least one letter"}, 400
-
-        if not re.search(r'[0-9]', password):
-            return {"error": "Password must contain at least one number"}, 400
-
-        if role not in ("candidate", "employer"):
-            return {"error": "Invalid role"}, 400
-
-        if role == "employer" and not company_name:
-            return {"error": "Company name is required for employer"}, 400
-
-        existing = db.session.execute(
-            text("SELECT id FROM users WHERE email = :e"),
-            {"e": email}
-        ).first()
-        if existing:
-            return {"error": "Email already registered. Please login first to add a new role."}, 409
-
-        username = generate_username_from_email(email, db.session)
-
-        password_bytes = password.encode("utf-8")
-        salt = bcrypt.gensalt(rounds=12)
-        password_hash = bcrypt.hashpw(password_bytes, salt).decode("utf-8")
-
-        result = db.session.execute(
-            text("""
-                INSERT INTO users 
-                    (username, email, password_hash, full_name, role, created_at, updated_at)
-                VALUES 
-                    (:username, :email, :password_hash, :full_name, :role, NOW(), NOW())
-                RETURNING id, username, email, full_name
-            """),
-            {
-                "username": username,
-                "email": email,
-                "password_hash": password_hash,
-                "full_name": full_name or None,
-                "role": role,
-            }
-        )
-        user_row = result.mappings().first()
-        user_id = user_row["id"]
-
-        db.session.execute(
-            text("""
-                INSERT INTO user_roles (user_id, role, created_at)
-                VALUES (:user_id, :role, NOW())
-            """),
-            {"user_id": user_id, "role": role}
-        )
-
-        if role == "employer":
-            db.session.execute(
-                text("""
-                    INSERT INTO employer_profiles 
-                        (user_id, company_name, industry, created_at, updated_at)
-                    VALUES 
-                        (:user_id, :company_name, :industry, NOW(), NOW())
-                """),
-                {
-                    "user_id": user_id,
-                    "company_name": company_name,
-                    "industry": industry or None,
-                }
-            )
-
-        db.session.commit()
-
-        return {
-            "status": "success",
-            "message": "Account created successfully",
-            "user": {
-                "id": user_row["id"],
-                "username": user_row["username"],
-                "email": user_row["email"],
-                "full_name": user_row["full_name"],
-                "roles": [role],
-                "role": role,
-            }
-        }, 201
-
-    except IntegrityError as e:
-        db.session.rollback()
-        return {"error": "Integrity error", "detail": str(e)}, 409
-    except Exception as e:
-        db.session.rollback()
-        print(f"Register error: {e}")
-        import traceback
-        traceback.print_exc()
-        return {"error": str(e)}, 500
-
-
-@app.route("/api/auth/login", methods=["POST"])
-def auth_login():
-    try:
-        data = request.json
-        email = (data.get("email") or "").strip().lower()
-        password = data.get("password") or ""
-        requested_role = (data.get("role") or "").lower()
-
-        if not email or not password:
-            return {"error": "Email and password are required"}, 400
-
-        result = db.session.execute(
-            text("""
-                SELECT id, username, email, password_hash, full_name
-                FROM users WHERE email = :e
-            """),
-            {"e": email}
-        )
-        user = result.mappings().first()
-
-        if not user:
-            return {"error": "Invalid email or password"}, 401
-
-        password_bytes = password.encode("utf-8")
-        hash_bytes = user["password_hash"].encode("utf-8")
-
-        if not bcrypt.checkpw(password_bytes, hash_bytes):
-            return {"error": "Invalid email or password"}, 401
-
-        roles_result = db.session.execute(
-            text("""
-                SELECT role FROM user_roles 
-                WHERE user_id = :uid
-                ORDER BY role
-            """),
-            {"uid": user["id"]}
-        )
-        roles = [row[0] for row in roles_result]
-
-        if not roles:
-            roles = ["candidate"]
-
-        if requested_role and requested_role in roles:
-            selected_role = requested_role
-        else:
-            selected_role = roles[0]
-
-        response_user = {
-            "id": user["id"],
-            "username": user["username"],
-            "email": user["email"],
-            "full_name": user["full_name"],
-            "roles": roles,
-            "role": selected_role,
-        }
-
-        if "employer" in roles:
-            emp_result = db.session.execute(
-                text("""
-                    SELECT company_name, industry, company_logo
-                    FROM employer_profiles WHERE user_id = :uid
-                """),
-                {"uid": user["id"]}
-            )
-            emp = emp_result.mappings().first()
-            if emp:
-                response_user["company_name"] = emp["company_name"]
-                response_user["industry"] = emp["industry"]
-                response_user["company_logo"] = emp["company_logo"]
-
-        return {
-            "status": "success",
-            "message": "Login successful",
-            "user": response_user
-        }, 200
-
-    except Exception as e:
-        print(f"Login error: {e}")
-        import traceback
-        traceback.print_exc()
-        return {"error": str(e)}, 500
-
 
 @app.route("/api/auth/add-role", methods=["POST"])
 def auth_add_role():
