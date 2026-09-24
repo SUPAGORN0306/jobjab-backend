@@ -48,3 +48,17 @@ credentials.json
 app.py.backup-*
 *.backup-*
 .env.test
+
+# Coverage
+.coverage
+coverage.xml
+htmlcov/
+.pytest_cache/
+
+# Test env
+.env.test
+
+# Backup files
+*.bak
+*.backup
+*.py.bak
