@@ -174,3 +174,20 @@ class TestTokenHelpers:
             tokens = create_tokens_for_user(user_id=1, role="candidate")
             payload = decode_token_payload(tokens["access_token"])
         assert is_token_type_refresh(payload) is False
+
+
+class TestTtlEdgeCases:
+
+    def test_get_ttl_invalid_token(self):
+        """Token invalid → 0"""
+        from auth_utils import get_token_ttl_seconds
+        assert get_token_ttl_seconds("not.a.token") == 0
+        assert get_token_ttl_seconds("") == 0
+
+    def test_get_ttl_missing_exp(self):
+        """Token valid แต่ payload ไม่มี exp → 0"""
+        from unittest.mock import patch
+        from auth_utils import get_token_ttl_seconds
+
+        with patch("auth_utils.decode_token_payload", return_value={"sub": "1"}):
+            assert get_token_ttl_seconds("fake") == 0
