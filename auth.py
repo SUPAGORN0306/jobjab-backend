@@ -93,7 +93,7 @@ def _generate_username_from_email(email: str) -> str:
 # ============================================================
 
 @auth_bp.route("/register", methods=["POST"])
-@limiter.limit("3 per hour")
+@limiter.limit("10 per hour")
 def register():
     """สมัครสมาชิกใหม่"""
     data = request.get_json(silent=True) or {}
@@ -206,7 +206,7 @@ def register():
 # ============================================================
 
 @auth_bp.route("/login", methods=["POST"])
-@limiter.limit("5 per minute")
+@limiter.limit("20 per minute")
 def login():
     """เข้าสู่ระบบ + set cookies"""
     data = request.get_json(silent=True) or {}
