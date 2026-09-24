@@ -8,7 +8,7 @@ import bcrypt
 import re
 import uuid
 from werkzeug.utils import secure_filename
-from werkzeug.exceptions import RequestEntityTooLarge
+from werkzeug.exceptions import RequestEntityTooLarge, HTTPException
 
 import requests as http_requests
 
@@ -23,10 +23,14 @@ from auth import auth_bp
 # ---------- Sprint 2: Auth decorators ----------
 from security import (
     require_auth, require_role, require_owner,
-    is_valid_phone, is_supabase_url, is_safe_filename,
+    is_valid_email, is_valid_phone, is_supabase_url, is_safe_filename,
     detect_file_type, validate_file_magic,
     sanitize_text,
 )
+
+# ---------- Logging (init first) ----------
+setup_logging()
+logger = get_logger(__name__)
 
 # ⭐ Supabase Storage config
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -116,10 +120,6 @@ csrf.init_app(app)
 
 # Exempt auth blueprint จาก Flask-WTF CSRF (ใช้ JWT CSRF แทน)
 csrf.exempt(auth_bp)
-
-# ---------- Logging ----------
-setup_logging()
-logger = get_logger(__name__)
 
 # ---------- Register blueprints ----------
 app.register_blueprint(auth_bp)
@@ -296,8 +296,6 @@ def load_user_data(user_id, db_session):
         }
     except Exception as e:
         logger.error("load_user_data_failed", error=str(e), exc_info=True)
-        import traceback
-        traceback.print_exc()
         return {"industry": "", "skills": [], "total_years": 0}
 
 
@@ -493,10 +491,8 @@ def get_jobs():
         return {"jobs": jobs_list}
 
     except Exception as e:
-        logger.error("operation_failed", error=str(e), exc_info=True)
-        import traceback
-        traceback.print_exc()
-        return {"error": str(e), "jobs": []}, 500
+        logger.error("get_jobs_failed", error=str(e), exc_info=True)
+        return {"error": {"code": "INTERNAL_ERROR", "message": "ไม่สามารถโหลดงานได้"}}, 500
 
 
 @app.route("/api/jobs/<int:job_id>")
@@ -554,9 +550,7 @@ def get_job_detail(job_id):
 
     except Exception as e:
         logger.error("operation_failed", error=str(e), exc_info=True)
-        import traceback
-        traceback.print_exc()
-        return {"error": str(e)}, 500
+        return {"error": {"code": "INTERNAL_ERROR", "message": "เกิดข้อผิดพลาด"}}, 500
 
 
 # =============================================================================
@@ -652,9 +646,7 @@ def get_full_profile(user_id):
 
     except Exception as e:
         logger.error("operation_failed", error=str(e), exc_info=True)
-        import traceback
-        traceback.print_exc()
-        return {"error": str(e)}, 500
+        return {"error": {"code": "INTERNAL_ERROR", "message": "เกิดข้อผิดพลาด"}}, 500
 
 
 @app.route("/api/profile/<int:user_id>", methods=["PUT"])
@@ -798,9 +790,7 @@ def update_profile(user_id):
     except Exception as e:
         db.session.rollback()
         logger.error("operation_failed", error=str(e), exc_info=True)
-        import traceback
-        traceback.print_exc()
-        return {"error": str(e)}, 500
+        return {"error": {"code": "INTERNAL_ERROR", "message": "เกิดข้อผิดพลาด"}}, 500
 
 
 # =============================================================================
@@ -931,9 +921,7 @@ def get_application_detail(application_id):
 
     except Exception as e:
         logger.error("operation_failed", error=str(e), exc_info=True)
-        import traceback
-        traceback.print_exc()
-        return {"error": str(e)}, 500
+        return {"error": {"code": "INTERNAL_ERROR", "message": "เกิดข้อผิดพลาด"}}, 500
 
 
 @app.route("/api/applications", methods=["POST"])
@@ -1133,9 +1121,7 @@ def create_application():
     except Exception as e:
         db.session.rollback()
         logger.error("operation_failed", error=str(e), exc_info=True)
-        import traceback
-        traceback.print_exc()
-        return {"error": str(e)}, 500
+        return {"error": {"code": "INTERNAL_ERROR", "message": "เกิดข้อผิดพลาด"}}, 500
 
 
 # =============================================================================
@@ -1291,8 +1277,6 @@ def auth_add_role():
     except Exception as e:
         db.session.rollback()
         logger.error("add_role_failed", error=str(e), exc_info=True)
-        import traceback
-        traceback.print_exc()
         return {"error": str(e)}, 500
 
 
@@ -1399,8 +1383,6 @@ def get_employer_jobs():
 
     except Exception as e:
         logger.error("get_employer_jobs_failed", error=str(e), exc_info=True)
-        import traceback
-        traceback.print_exc()
         return {"error": str(e)}, 500
 
 
@@ -1535,8 +1517,6 @@ def create_employer_job():
     except Exception as e:
         db.session.rollback()
         logger.error("create_job_failed", error=str(e), exc_info=True)
-        import traceback
-        traceback.print_exc()
         return {"error": str(e)}, 500
 
 
@@ -1598,8 +1578,6 @@ def get_job_applications(job_id):
 
     except Exception as e:
         logger.error("get_job_applications_failed", error=str(e), exc_info=True)
-        import traceback
-        traceback.print_exc()
         return {"error": str(e)}, 500
 
 
@@ -1681,8 +1659,6 @@ def get_application_snapshot(application_id):
 
     except Exception as e:
         logger.error("get_application_detail_failed", error=str(e), exc_info=True)
-        import traceback
-        traceback.print_exc()
         return {"error": str(e)}, 500
 
 
@@ -1743,8 +1719,6 @@ def update_application_status(application_id):
     except Exception as e:
         db.session.rollback()
         logger.error("update_status_failed", error=str(e), exc_info=True)
-        import traceback
-        traceback.print_exc()
         return {"error": str(e)}, 500
 
 
@@ -1879,8 +1853,6 @@ def upload_resume():
     except Exception as e:
         db.session.rollback()
         logger.error("upload_resume_failed", error=str(e), exc_info=True)
-        import traceback
-        traceback.print_exc()
         return {"error": str(e)}, 500
 
 
@@ -2016,8 +1988,6 @@ def upload_avatar():
     except Exception as e:
         db.session.rollback()
         logger.error("upload_avatar_failed", error=str(e), exc_info=True)
-        import traceback
-        traceback.print_exc()
         return {"error": str(e)}, 500
 
 
@@ -2107,8 +2077,6 @@ def upload_company_logo():
     except Exception as e:
         db.session.rollback()
         logger.error("upload_company_logo_failed", error=str(e), exc_info=True)
-        import traceback
-        traceback.print_exc()
         return {"error": str(e)}, 500
 
 
@@ -2173,9 +2141,61 @@ def get_match_score(job_id):
 # ERROR HANDLERS
 # =============================================================================
 
+# =============================================================================
+# ERROR HANDLERS (Sprint 3.3)
+# =============================================================================
+
 @app.errorhandler(RequestEntityTooLarge)
 def handle_file_too_large(e):
-    return {"error": "File too large. Maximum size is 5MB."}, 413
+    return {"error": {"code": "FILE_TOO_LARGE", "message": "ไฟล์ใหญ่เกินไป (สูงสุด 5MB)"}}, 413
+
+
+@app.errorhandler(HTTPException)
+def handle_http_exception(e):
+    """Handle HTTP errors (401, 403, 404, 405, ...)"""
+    logger.warning("http_exception", status=e.code, name=e.name, path=request.path)
+    return {
+        "error": {
+            "code": e.name.upper().replace(" ", "_"),
+            "message": e.description or e.name,
+        }
+    }, e.code
+
+
+@app.errorhandler(IntegrityError)
+def handle_integrity_error(e):
+    """Handle database integrity errors"""
+    db.session.rollback()
+    logger.error("db_integrity_error", error=str(e), exc_info=True)
+    return {
+        "error": {
+            "code": "CONFLICT",
+            "message": "ข้อมูลซ้ำหรือขัดแย้ง",
+        }
+    }, 409
+
+
+@app.errorhandler(Exception)
+def handle_generic_error(e):
+    """Handle unexpected errors — ไม่โชว์ str(e) ใน production"""
+    db.session.rollback()
+    logger.error("unhandled_error", error=str(e), path=request.path, exc_info=True)
+
+    if settings.is_development:
+        return {
+            "error": {
+                "code": "INTERNAL_ERROR",
+                "message": str(e),
+                "type": type(e).__name__,
+            }
+        }, 500
+
+    return {
+        "error": {
+            "code": "INTERNAL_ERROR",
+            "message": "เกิดข้อผิดพลาด กรุณาลองใหม่",
+        }
+    }, 500
 
 
 # =============================================================================
