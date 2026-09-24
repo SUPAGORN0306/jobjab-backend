@@ -44,14 +44,23 @@ ALLOWED_JOB_TITLES = {
 
 app = Flask(__name__)
 
-CORS(app, origins=[
-    "http://localhost:5173",
-    "http://localhost:3000",
-    "http://127.0.0.1:5173",
-    "https://joblab-one.vercel.app",
-    "https://jobjab-one.vercel.app",
-    "https://*.vercel.app",
-])
+CORS(
+    app,
+    origins=[
+        "http://localhost:5173",
+        "http://localhost:3000",
+        "http://127.0.0.1:5173",
+        "https://joblab-one.vercel.app",
+        "https://jobjab-one.vercel.app",
+    ],
+    supports_credentials=True,  # ⭐ สำหรับ withCredentials: true
+    allow_headers=["Content-Type", "Authorization", "X-CSRF-Token"],
+    expose_headers=[
+        "X-RateLimit-Limit",
+        "X-RateLimit-Remaining",
+        "X-RateLimit-Reset",
+    ],
+)
 
 app.config["SQLALCHEMY_DATABASE_URI"] = os.getenv("DATABASE_URL")
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
@@ -81,6 +90,9 @@ app.config["JWT_TOKEN_LOCATION"] = ["cookies", "headers"]
 app.config["JWT_COOKIE_SECURE"] = settings.cookie_secure
 app.config["JWT_COOKIE_SAMESITE"] = "None" if settings.cookie_secure else "Lax"
 app.config["JWT_COOKIE_CSRF_PROTECT"] = False  # เราจัดการ CSRF เอง
+
+# ⭐ ปิด Flask-WTF CSRF — เราเป็น REST API ใช้ JWT CSRF แทน
+app.config["WTF_CSRF_ENABLED"] = False
 
 # ---------- Cookie names (ต้องตรงกับ cookies.py) ----------
 app.config["JWT_ACCESS_COOKIE_NAME"] = "access_token"
