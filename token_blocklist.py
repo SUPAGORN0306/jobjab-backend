@@ -18,19 +18,21 @@ class _MemoryBackend:
     """In-memory backend — dev only"""
 
     def __init__(self) -> None:
-        self._store: dict[str, float] = {}
+        # เก็บ (value, expires_at)
+        self._store: dict[str, tuple[str, float]] = {}
 
     def setex(self, key: str, ttl: int, value: str = "1") -> None:
-        self._store[key] = time.time() + ttl
+        self._store[key] = (value, time.time() + ttl)
 
     def get(self, key: str) -> str | None:
-        exp = self._store.get(key)
-        if exp is None:
+        item = self._store.get(key)
+        if item is None:
             return None
+        value, exp = item
         if exp < time.time():
             self._store.pop(key, None)
             return None
-        return "1"
+        return value
 
     def exists(self, key: str) -> bool:
         return self.get(key) is not None

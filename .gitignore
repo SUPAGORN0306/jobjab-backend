@@ -47,3 +47,4 @@ credentials.json
 # ---------- Backups ----------
 app.py.backup-*
 *.backup-*
+.env.test
