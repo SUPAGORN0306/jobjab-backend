@@ -206,3 +206,104 @@ def is_valid_password(password: str) -> tuple[bool, str]:
     if not re.search(r"\d", password):
         return False, "Password ต้องมีตัวเลขอย่างน้อย 1 ตัว"
     return True, ""
+
+# ============================================================
+# SPRINT 3: Extended Validation
+# ============================================================
+
+import re as _re
+from urllib.parse import urlparse
+
+
+# ---------- Phone ----------
+PHONE_E164_RE = _re.compile(r"^\+[1-9]\d{1,14}$")
+PHONE_TH_RE = _re.compile(r"^0\d{8,9}$")
+
+
+def is_valid_phone(phone: str) -> bool:
+    """
+    ตรวจ phone format
+    - E.164: +66891234567
+    - ไทย: 0891234567
+    """
+    if not phone:
+        return False
+    phone = phone.strip().replace(" ", "").replace("-", "")
+    return bool(PHONE_E164_RE.match(phone) or PHONE_TH_RE.match(phone))
+
+
+# ---------- URL (Supabase only) ----------
+def is_supabase_url(url: str) -> bool:
+    """
+    ตรวจว่า URL เป็น Supabase Storage จริง
+    ป้องกัน SSRF + malicious URL
+    """
+    if not url:
+        return False
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme != "https":
+            return False
+        if not parsed.netloc.endswith(".supabase.co"):
+            return False
+        if "/storage/v1/object/public/" not in parsed.path:
+            return False
+        return True
+    except Exception:
+        return False
+
+
+# ---------- Filename safety ----------
+def is_safe_filename(filename: str) -> bool:
+    """
+    ตรวจชื่อไฟล์ — ห้าม path traversal
+    """
+    if not filename or len(filename) > 255:
+        return False
+    forbidden = ["..", "/", "\\", "\x00", "%2e", "%2f"]
+    lower = filename.lower()
+    for f in forbidden:
+        if f in lower:
+            return False
+    return True
+
+
+# ---------- File magic bytes ----------
+MAGIC_BYTES = {
+    b"%PDF": "pdf",
+    b"\x89PNG": "png",
+    b"\xff\xd8\xff": "jpg",
+    b"GIF87a": "gif",
+    b"GIF89a": "gif",
+    b"RIFF": "webp",
+}
+
+
+def detect_file_type(file_bytes: bytes) -> str | None:
+    """
+    ตรวจ file type จาก magic bytes (ไม่เชื่อ extension)
+    Returns: 'pdf', 'png', 'jpg', 'gif', 'webp' หรือ None
+    """
+    if not file_bytes or len(file_bytes) < 8:
+        return None
+
+    header = file_bytes[:16]
+
+    for magic, file_type in MAGIC_BYTES.items():
+        if header.startswith(magic):
+            if file_type == "webp":
+                if b"WEBP" not in file_bytes[:16]:
+                    continue
+            return file_type
+
+    return None
+
+
+def validate_file_magic(file_bytes: bytes, allowed_types: list[str]) -> bool:
+    """
+    ตรวจ file type จาก magic bytes ว่าอยู่ใน allowed_types
+    """
+    detected = detect_file_type(file_bytes)
+    if not detected:
+        return False
+    return detected in allowed_types

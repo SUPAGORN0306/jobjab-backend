@@ -21,14 +21,19 @@ from logging_config import setup_logging, get_logger
 from auth import auth_bp
 
 # ---------- Sprint 2: Auth decorators ----------
-from security import require_auth, require_role, require_owner
+from security import (
+    require_auth, require_role, require_owner,
+    is_valid_phone, is_supabase_url, is_safe_filename,
+    detect_file_type, validate_file_magic,
+    sanitize_text,
+)
 
 # ⭐ Supabase Storage config
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
 
 if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
-    print("⚠️  Missing SUPABASE_URL or SUPABASE_SERVICE_KEY in .env")
+    logger.warning("missing_supabase_env")
 
 # =============================================================================
 # CONSTANTS
@@ -175,7 +180,7 @@ def sb_delete(bucket, path):
         res = http_requests.delete(url, headers=headers, timeout=15)
         return res
     except Exception as e:
-        print(f"sb_delete error: {e}")
+        logger.warning("sb_delete_failed", error=str(e))
         return None
 
 
@@ -194,7 +199,7 @@ def extract_supabase_path(url, bucket):
             return url.split(marker)[-1]
         return None
     except Exception as e:
-        print(f"extract_supabase_path error: {e}")
+        logger.warning("extract_supabase_path_failed", error=str(e))
         return None
 
 
@@ -290,7 +295,7 @@ def load_user_data(user_id, db_session):
             "total_years": float(exp_result["total_years"] or 0) if exp_result else 0,
         }
     except Exception as e:
-        print(f"load_user_data error: {e}")
+        logger.error("load_user_data_failed", error=str(e), exc_info=True)
         import traceback
         traceback.print_exc()
         return {"industry": "", "skills": [], "total_years": 0}
@@ -353,7 +358,7 @@ def calculate_match_score_fast(job_row, user_data):
             "total_years": round(total_years, 1),
         }
     except Exception as e:
-        print(f"calculate_match_score_fast error: {e}")
+        logger.error("calculate_match_score_failed", error=str(e), exc_info=True)
         return {
             "overall": 0, "skills_match": 0, "experience_match": 0,
             "industry_match": 0, "matched_skills": [], "missing_skills": [],
@@ -488,7 +493,7 @@ def get_jobs():
         return {"jobs": jobs_list}
 
     except Exception as e:
-        print(f"ERROR: {e}")
+        logger.error("operation_failed", error=str(e), exc_info=True)
         import traceback
         traceback.print_exc()
         return {"error": str(e), "jobs": []}, 500
@@ -548,7 +553,7 @@ def get_job_detail(job_id):
         return {"job": job_dict}
 
     except Exception as e:
-        print(f"ERROR: {e}")
+        logger.error("operation_failed", error=str(e), exc_info=True)
         import traceback
         traceback.print_exc()
         return {"error": str(e)}, 500
@@ -646,7 +651,7 @@ def get_full_profile(user_id):
         }, 200
 
     except Exception as e:
-        print(f"ERROR: {e}")
+        logger.error("operation_failed", error=str(e), exc_info=True)
         import traceback
         traceback.print_exc()
         return {"error": str(e)}, 500
@@ -665,6 +670,18 @@ def update_profile(user_id):
         if not data:
             return {"error": "No data provided"}, 400
 
+        # ⭐ Sprint 3: Validation + Sanitize
+        # Phone validation
+        phone = data.get("phone")
+        if phone and not is_valid_phone(phone):
+            return {"error": {"code": "INVALID_PHONE", "message": "เบอร์โทรไม่ถูกต้อง"}}, 400
+
+        # Sanitize text (XSS protection)
+        full_name = sanitize_text(data.get("full_name") or "", max_length=100) or None
+        bio = sanitize_text(data.get("bio") or "", max_length=2000) or None
+        location = sanitize_text(data.get("location") or "", max_length=200) or None
+        industry = sanitize_text(data.get("industry") or "", max_length=100) or None
+
         db.session.execute(
             text("""
                 UPDATE users 
@@ -679,11 +696,11 @@ def update_profile(user_id):
             """),
             {
                 "user_id": user_id,
-                "full_name": data.get("full_name"),
-                "phone": data.get("phone"),
-                "location": data.get("location"),
-                "bio": data.get("bio"),
-                "industry": data.get("industry"),
+                "full_name": full_name,
+                "phone": phone,
+                "location": location,
+                "bio": bio,
+                "industry": industry,
                 "profile_image": data.get("profile_image"),
             }
         )
@@ -770,6 +787,9 @@ def update_profile(user_id):
                 )
 
         db.session.commit()
+
+        logger.info("profile_updated", user_id=user_id)
+
         return {"status": "success", "message": "Profile updated successfully"}, 200
 
     except IntegrityError as e:
@@ -777,7 +797,7 @@ def update_profile(user_id):
         return {"error": "Constraint violation", "detail": str(e)}, 409
     except Exception as e:
         db.session.rollback()
-        print(f"ERROR: {e}")
+        logger.error("operation_failed", error=str(e), exc_info=True)
         import traceback
         traceback.print_exc()
         return {"error": str(e)}, 500
@@ -910,7 +930,7 @@ def get_application_detail(application_id):
         }, 200
 
     except Exception as e:
-        print(f"ERROR: {e}")
+        logger.error("operation_failed", error=str(e), exc_info=True)
         import traceback
         traceback.print_exc()
         return {"error": str(e)}, 500
@@ -928,13 +948,40 @@ def create_application():
         # ⭐ ใช้ g.user_id
         user_id = g.user_id
         job_id = data.get("jobId") or data.get("job_id")
-        full_name = data.get("fullName") or data.get("full_name")
-        email = data.get("email")
+
+        # ⭐ Sprint 3: Validation + Sanitize
+        full_name = sanitize_text(
+            data.get("fullName") or data.get("full_name") or "",
+            max_length=100,
+        ) or None
+
+        email_raw = (data.get("email") or "").strip().lower()
+        if email_raw and not is_valid_email(email_raw):
+            return {"error": {"code": "INVALID_EMAIL", "message": "อีเมลไม่ถูกต้อง"}}, 400
+        email = email_raw or None
+
         phone = data.get("phone")
-        location = data.get("location", "")
-        resume_filename = data.get("resumeFilename") or data.get("resume_filename", "")
-        resume_url = data.get("resumeUrl") or data.get("resume_url", "")
-        cover_letter = data.get("coverLetter") or data.get("cover_letter", "")
+        if phone and not is_valid_phone(phone):
+            return {"error": {"code": "INVALID_PHONE", "message": "เบอร์โทรไม่ถูกต้อง"}}, 400
+
+        location = sanitize_text(
+            data.get("location") or "",
+            max_length=200,
+        ) or ""
+
+        resume_filename = sanitize_text(
+            data.get("resumeFilename") or data.get("resume_filename") or "",
+            max_length=255,
+        ) or ""
+
+        resume_url = data.get("resumeUrl") or data.get("resume_url") or ""
+        if resume_url and not is_supabase_url(resume_url):
+            return {"error": {"code": "INVALID_RESUME_URL", "message": "URL resume ไม่ถูกต้อง"}}, 400
+
+        cover_letter = sanitize_text(
+            data.get("coverLetter") or data.get("cover_letter") or "",
+            max_length=5000,
+        ) or ""
 
         skills = data.get("skills", [])
         experiences = data.get("experiences", [])
@@ -1067,6 +1114,13 @@ def create_application():
 
         db.session.commit()
 
+        logger.info(
+            "application_submitted",
+            user_id=user_id,
+            job_id=job_id,
+            application_id=application_id,
+        )
+
         return {
             "status": "success",
             "message": "Application submitted successfully!",
@@ -1078,7 +1132,7 @@ def create_application():
         return {"error": "Integrity error", "detail": str(e)}, 409
     except Exception as e:
         db.session.rollback()
-        print(f"ERROR: {e}")
+        logger.error("operation_failed", error=str(e), exc_info=True)
         import traceback
         traceback.print_exc()
         return {"error": str(e)}, 500
@@ -1112,7 +1166,7 @@ def get_favorites():
         rows = result.mappings().all()
         return {"favorites": [serialize_row(row) for row in rows]}
     except Exception as e:
-        print(f"Get favorites error: {e}")
+        logger.error("get_favorites_failed", error=str(e), exc_info=True)
         return {"error": str(e)}, 500
 
 
@@ -1146,6 +1200,7 @@ def toggle_favorite():
                 {"user_id": user_id, "job_id": job_id}
             )
             db.session.commit()
+            logger.info("favorite_removed", user_id=user_id, job_id=job_id)
             return {"favorited": False, "message": "Removed from favorites"}
         else:
             db.session.execute(
@@ -1153,11 +1208,12 @@ def toggle_favorite():
                 {"user_id": user_id, "job_id": job_id}
             )
             db.session.commit()
+            logger.info("favorite_added", user_id=user_id, job_id=job_id)
             return {"favorited": True, "message": "Added to favorites"}
 
     except Exception as e:
         db.session.rollback()
-        print(f"Toggle favorite error: {e}")
+        logger.error("toggle_favorite_failed", error=str(e), exc_info=True)
         return {"error": str(e)}, 500
 
 
@@ -1234,7 +1290,7 @@ def auth_add_role():
         return {"error": "Integrity error", "detail": str(e)}, 409
     except Exception as e:
         db.session.rollback()
-        print(f"Add role error: {e}")
+        logger.error("add_role_failed", error=str(e), exc_info=True)
         import traceback
         traceback.print_exc()
         return {"error": str(e)}, 500
@@ -1342,7 +1398,7 @@ def get_employer_jobs():
         return {"jobs": jobs}, 200
 
     except Exception as e:
-        print(f"Get employer jobs error: {e}")
+        logger.error("get_employer_jobs_failed", error=str(e), exc_info=True)
         import traceback
         traceback.print_exc()
         return {"error": str(e)}, 500
@@ -1356,21 +1412,54 @@ def create_employer_job():
         data = request.json
 
         user_id = g.user_id
-        job_title = (data.get("job_title") or "").strip()
-        company_name = (data.get("company_name") or "").strip()
-        location = (data.get("location") or "").strip()
-        employment_type = data.get("employment_type", "Full-time")
-        experience_level = data.get("experience_level", "Mid")
+
+        # ⭐ Sprint 3: Validation + Sanitize
+        job_title = sanitize_text(data.get("job_title") or "", max_length=100)
+        company_name = sanitize_text(data.get("company_name") or "", max_length=200)
+        location = sanitize_text(data.get("location") or "", max_length=200)
+        skills_required = sanitize_text(data.get("skills_required") or "", max_length=1000)
+        tools_preferred = sanitize_text(data.get("tools_preferred") or "", max_length=1000)
+        industry = sanitize_text(data.get("industry") or "", max_length=100)
+        company_size = sanitize_text(data.get("company_size") or "", max_length=50)
+        about_role = sanitize_text(data.get("about_role") or "", max_length=5000)
+        responsibilities = sanitize_text(data.get("responsibilities") or "", max_length=5000)
+        requirements = sanitize_text(data.get("requirements") or "", max_length=5000)
+
+        # ⭐ Validate employment_type
+        employment_type = (data.get("employment_type") or "Full-time").strip()
+        ALLOWED_EMPLOYMENT_TYPES = {"Full-time", "Part-time", "Contract", "Internship"}
+        if employment_type not in ALLOWED_EMPLOYMENT_TYPES:
+            return {
+                "error": {"code": "INVALID_EMPLOYMENT_TYPE",
+                          "message": f"ต้องเป็น: {', '.join(ALLOWED_EMPLOYMENT_TYPES)}"}
+            }, 400
+
+        # ⭐ Validate experience_level
+        experience_level = (data.get("experience_level") or "Mid").strip()
+        ALLOWED_EXPERIENCE_LEVELS = {"Entry", "Mid", "Senior", "Lead"}
+        if experience_level not in ALLOWED_EXPERIENCE_LEVELS:
+            return {
+                "error": {"code": "INVALID_EXPERIENCE_LEVEL",
+                          "message": f"ต้องเป็น: {', '.join(ALLOWED_EXPERIENCE_LEVELS)}"}
+            }, 400
+
+        # ⭐ Validate salary (ตัวเลขบวก, min <= max)
         salary_min = data.get("salary_min")
         salary_max = data.get("salary_max")
-        skills_required = (data.get("skills_required") or "").strip()
-        tools_preferred = (data.get("tools_preferred") or "").strip()
-        industry = (data.get("industry") or "").strip()
-        company_size = (data.get("company_size") or "").strip()
-        about_role = (data.get("about_role") or "").strip()
-        responsibilities = (data.get("responsibilities") or "").strip()
-        requirements = (data.get("requirements") or "").strip()
+        try:
+            salary_min = float(salary_min) if salary_min else None
+            salary_max = float(salary_max) if salary_max else None
+        except (ValueError, TypeError):
+            return {"error": {"code": "INVALID_SALARY", "message": "เงินเดือนต้องเป็นตัวเลข"}}, 400
 
+        if salary_min is not None and salary_min < 0:
+            return {"error": {"code": "INVALID_SALARY", "message": "เงินเดือนต้องไม่ติดลบ"}}, 400
+        if salary_max is not None and salary_max < 0:
+            return {"error": {"code": "INVALID_SALARY", "message": "เงินเดือนต้องไม่ติดลบ"}}, 400
+        if salary_min and salary_max and salary_min > salary_max:
+            return {"error": {"code": "INVALID_SALARY", "message": "เงินเดือนต่ำสุดต้อง <= สูงสุด"}}, 400
+
+        # ⭐ Validate required
         if not job_title:
             return {"error": "Job title is required"}, 400
         if job_title not in ALLOWED_JOB_TITLES:
@@ -1426,6 +1515,14 @@ def create_employer_job():
 
         db.session.commit()
 
+        logger.info(
+            "job_created",
+            user_id=user_id,
+            job_id=job_id,
+            job_title=job_title,
+            company_name=company_name,
+        )
+
         return {
             "status": "success",
             "message": "Job posted successfully",
@@ -1437,7 +1534,7 @@ def create_employer_job():
         return {"error": "Integrity error", "detail": str(e)}, 409
     except Exception as e:
         db.session.rollback()
-        print(f"Create job error: {e}")
+        logger.error("create_job_failed", error=str(e), exc_info=True)
         import traceback
         traceback.print_exc()
         return {"error": str(e)}, 500
@@ -1500,7 +1597,7 @@ def get_job_applications(job_id):
         }, 200
 
     except Exception as e:
-        print(f"Get job applications error: {e}")
+        logger.error("get_job_applications_failed", error=str(e), exc_info=True)
         import traceback
         traceback.print_exc()
         return {"error": str(e)}, 500
@@ -1583,7 +1680,7 @@ def get_application_snapshot(application_id):
         }, 200
 
     except Exception as e:
-        print(f"Get application detail error: {e}")
+        logger.error("get_application_detail_failed", error=str(e), exc_info=True)
         import traceback
         traceback.print_exc()
         return {"error": str(e)}, 500
@@ -1629,6 +1726,13 @@ def update_application_status(application_id):
 
         db.session.commit()
 
+        logger.info(
+            "application_status_updated",
+            user_id=g.user_id,
+            application_id=application_id,
+            new_status=new_status,
+        )
+
         return {
             "status": "success",
             "message": f"Status updated to '{new_status}'",
@@ -1638,7 +1742,7 @@ def update_application_status(application_id):
 
     except Exception as e:
         db.session.rollback()
-        print(f"Update status error: {e}")
+        logger.error("update_status_failed", error=str(e), exc_info=True)
         import traceback
         traceback.print_exc()
         return {"error": str(e)}, 500
@@ -1700,8 +1804,20 @@ def upload_resume():
         if file.filename == "":
             return {"error": "Empty filename"}, 400
 
+        # ⭐ 1. Filename safety (กัน path traversal)
+        if not is_safe_filename(file.filename):
+            return {"error": "Invalid filename"}, 400
+
+        # ⭐ 2. Extension check
         if not allowed_resume_file(file.filename):
             return {"error": "Only PDF files are allowed for resume"}, 400
+
+        # ⭐ 3. Read file bytes
+        file_bytes = file.read()
+
+        # ⭐ 4. Magic bytes check (PDF จริง)
+        if not validate_file_magic(file_bytes, ["pdf"]):
+            return {"error": "File is not a valid PDF"}, 400
 
         # ⭐ เก็บชื่อไฟล์จริง
         original_filename = file.filename
@@ -1711,7 +1827,6 @@ def upload_resume():
 
         # สร้างชื่อใน Supabase
         storage_filename = f"resume_user_{user_id}_{uuid.uuid4().hex[:8]}.pdf"
-        file_bytes = file.read()
 
         # ลบไฟล์เก่าใน Supabase
         old = db.session.execute(
@@ -1728,7 +1843,7 @@ def upload_resume():
         upload_res = sb_upload("resumes", storage_filename, file_bytes, "application/pdf")
 
         if upload_res.status_code not in (200, 201):
-            print(f"Supabase upload failed: {upload_res.status_code} - {upload_res.text}")
+            logger.error("supabase_upload_failed", status=upload_res.status_code, response=upload_res.text[:200])
             return {"error": f"Upload failed: {upload_res.text}"}, 500
 
         # Public URL
@@ -1747,6 +1862,13 @@ def upload_resume():
         )
         db.session.commit()
 
+        logger.info(
+            "resume_uploaded",
+            user_id=user_id,
+            filename=safe_filename,
+            size_bytes=len(file_bytes),
+        )
+
         return {
             "status": "success",
             "message": "Resume uploaded successfully",
@@ -1756,7 +1878,7 @@ def upload_resume():
 
     except Exception as e:
         db.session.rollback()
-        print(f"Upload resume error: {e}")
+        logger.error("upload_resume_failed", error=str(e), exc_info=True)
         import traceback
         traceback.print_exc()
         return {"error": str(e)}, 500
@@ -1796,11 +1918,13 @@ def delete_resume(user_id):
         )
         db.session.commit()
 
+        logger.info("resume_deleted", user_id=user_id)
+
         return {"status": "success", "message": "Resume deleted successfully"}, 200
 
     except Exception as e:
         db.session.rollback()
-        print(f"Delete resume error: {e}")
+        logger.error("delete_resume_failed", error=str(e), exc_info=True)
         return {"error": str(e)}, 500
 
 
@@ -1823,15 +1947,24 @@ def upload_avatar():
         if file.filename == "":
             return {"error": "Empty filename"}, 400
 
+        # ⭐ 1. Filename safety
+        if not is_safe_filename(file.filename):
+            return {"error": "Invalid filename"}, 400
+
+        # ⭐ 2. Extension check
         if not allowed_file(file.filename):
             return {
                 "error": f"Invalid file type. Allowed: {', '.join(ALLOWED_EXTENSIONS)}"
             }, 400
 
+        # ⭐ 3. Read + magic bytes
+        file_bytes = file.read()
+        if not validate_file_magic(file_bytes, ["png", "jpg", "gif", "webp"]):
+            return {"error": "File is not a valid image"}, 400
+
         # ⭐ สร้างชื่อไฟล์
         ext = file.filename.rsplit(".", 1)[1].lower()
         storage_filename = f"avatar_user_{user_id}_{uuid.uuid4().hex[:8]}.{ext}"
-        file_bytes = file.read()
         content_type = file.content_type or "image/jpeg"
 
         # ⭐ ลบไฟล์เก่า
@@ -1849,7 +1982,7 @@ def upload_avatar():
         upload_res = sb_upload("avatars", storage_filename, file_bytes, content_type)
 
         if upload_res.status_code not in (200, 201):
-            print(f"Supabase upload failed: {upload_res.status_code} - {upload_res.text}")
+            logger.error("supabase_upload_failed", status=upload_res.status_code, response=upload_res.text[:200])
             return {"error": f"Upload failed: {upload_res.text}"}, 500
 
         # ⭐ Public URL
@@ -1866,6 +1999,13 @@ def upload_avatar():
         )
         db.session.commit()
 
+        logger.info(
+            "avatar_uploaded",
+            user_id=user_id,
+            filename=storage_filename,
+            size_bytes=len(file_bytes),
+        )
+
         return {
             "status": "success",
             "message": "Avatar uploaded successfully",
@@ -1875,7 +2015,7 @@ def upload_avatar():
 
     except Exception as e:
         db.session.rollback()
-        print(f"Upload avatar error: {e}")
+        logger.error("upload_avatar_failed", error=str(e), exc_info=True)
         import traceback
         traceback.print_exc()
         return {"error": str(e)}, 500
@@ -1901,14 +2041,23 @@ def upload_company_logo():
         if file.filename == "":
             return {"error": "Empty filename"}, 400
 
+        # ⭐ 1. Filename safety
+        if not is_safe_filename(file.filename):
+            return {"error": "Invalid filename"}, 400
+
+        # ⭐ 2. Extension check
         if not allowed_file(file.filename):
             return {
                 "error": f"Invalid file type. Allowed: {', '.join(ALLOWED_EXTENSIONS)}"
             }, 400
 
+        # ⭐ 3. Read + magic bytes
+        file_bytes = file.read()
+        if not validate_file_magic(file_bytes, ["png", "jpg", "gif", "webp"]):
+            return {"error": "File is not a valid image"}, 400
+
         ext = file.filename.rsplit(".", 1)[1].lower()
         storage_filename = f"logo_user_{user_id}_{uuid.uuid4().hex[:8]}.{ext}"
-        file_bytes = file.read()
         content_type = file.content_type or "image/jpeg"
 
         # ⭐ ลบไฟล์เก่า
@@ -1926,7 +2075,7 @@ def upload_company_logo():
         upload_res = sb_upload("company-logos", storage_filename, file_bytes, content_type)
 
         if upload_res.status_code not in (200, 201):
-            print(f"Supabase upload failed: {upload_res.status_code} - {upload_res.text}")
+            logger.error("supabase_upload_failed", status=upload_res.status_code, response=upload_res.text[:200])
             return {"error": f"Upload failed: {upload_res.text}"}, 500
 
         image_url = sb_public_url("company-logos", storage_filename)
@@ -1942,6 +2091,12 @@ def upload_company_logo():
         )
         db.session.commit()
 
+        logger.info(
+            "company_logo_uploaded",
+            user_id=user_id,
+            filename=storage_filename,
+        )
+
         return {
             "status": "success",
             "message": "Company logo uploaded successfully",
@@ -1951,7 +2106,7 @@ def upload_company_logo():
 
     except Exception as e:
         db.session.rollback()
-        print(f"Upload company logo error: {e}")
+        logger.error("upload_company_logo_failed", error=str(e), exc_info=True)
         import traceback
         traceback.print_exc()
         return {"error": str(e)}, 500
@@ -1981,7 +2136,7 @@ def get_employer_profile():
         return {"profile": dict(result)}, 200
 
     except Exception as e:
-        print(f"Get employer profile error: {e}")
+        logger.error("get_employer_profile_failed", error=str(e), exc_info=True)
         return {"error": str(e)}, 500
 
 
