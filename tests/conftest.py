@@ -212,9 +212,9 @@ def make_user(app):
             result = db.session.execute(
                 text("""
                     INSERT INTO users
-                        (username, email, password_hash, full_name, role, created_at, updated_at)
+                        (username, email, password_hash, full_name, created_at, updated_at)
                     VALUES
-                        (:username, :email, :pw, :fn, :role, NOW(), NOW())
+                        (:username, :email, :pw, :fn, NOW(), NOW())
                     RETURNING id
                 """),
                 {
@@ -222,7 +222,6 @@ def make_user(app):
                     "email": email,
                     "pw": pw_hash,
                     "fn": full_name,
-                    "role": role,
                 },
             )
             user_id = result.scalar()

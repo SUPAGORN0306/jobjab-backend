@@ -139,19 +139,18 @@ def register():
         result = db.session.execute(
             text("""
                 INSERT INTO users
-                    (username, email, password_hash, full_name, role,
+                    (username, email, password_hash, full_name,
                      created_at, updated_at)
                 VALUES
-                    (:username, :email, :password_hash, :full_name, :role,
+                    (:username, :email, :password_hash, :full_name,
                      NOW(), NOW())
-                RETURNING id, username, email, full_name, role, created_at
+                RETURNING id, username, email, full_name, created_at
             """),
             {
                 "username": username,
                 "email": email,
                 "password_hash": password_hash,
                 "full_name": full_name or None,
-                "role": role,
             },
         )
         user_row = result.mappings().first()
@@ -222,7 +221,7 @@ def login():
     row = db.session.execute(
         text("""
             SELECT id, username, email, password_hash, full_name,
-                   role, profile_image, resume_url, resume_filename
+                   profile_image, resume_url, resume_filename
             FROM users WHERE email = :e
         """),
         {"e": email},
@@ -249,7 +248,9 @@ def login():
             logger.warning("rehash_failed", user_id=user_id, error=str(e))
 
     # ---------- Roles ----------
-    roles = _get_user_roles(user_id) or [row["role"] or "candidate"]
+    roles = _get_user_roles(user_id)
+    if not roles:
+        return _error("NO_ROLE", "ไม่พบ role ของผู้ใช้", 403)
 
     if requested_role and requested_role in roles:
         selected_role = requested_role
@@ -335,7 +336,7 @@ def refresh():
     # ---------- ดึง user ----------
     row = db.session.execute(
         text("""
-            SELECT id, username, email, full_name, role
+            SELECT id, username, email, full_name
             FROM users WHERE id = :uid
         """),
         {"uid": user_id},
@@ -345,7 +346,9 @@ def refresh():
         return _error("USER_NOT_FOUND", "ไม่พบผู้ใช้", 404)
 
     # ---------- ออก tokens ใหม่ ----------
-    roles = _get_user_roles(user_id) or [row["role"] or "candidate"]
+    roles = _get_user_roles(user_id)
+    if not roles:
+        return _error("NO_ROLE", "ไม่พบ role ของผู้ใช้", 403)
     selected_role = claims.get("role") or roles[0]
 
     tokens = create_tokens_for_user(user_id, selected_role)
@@ -400,7 +403,7 @@ def me():
     row = db.session.execute(
         text("""
             SELECT id, username, email, full_name, phone, location, bio,
-                   role, profile_image, industry, resume_url, resume_filename,
+                   profile_image, industry, resume_url, resume_filename,
                    created_at, updated_at
             FROM users WHERE id = :uid
         """),

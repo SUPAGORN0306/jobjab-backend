@@ -568,7 +568,7 @@ def get_profile(user_id):
         result = db.session.execute(
             text("""
                 SELECT id, username, email, full_name, phone, location, 
-                       bio, role, profile_image, created_at
+                       bio, profile_image, created_at
                 FROM users 
                 WHERE id = :user_id
             """),
@@ -595,7 +595,7 @@ def get_full_profile(user_id):
         user_result = db.session.execute(
             text("""
                 SELECT id, username, email, full_name, phone, location, 
-                    bio, role, profile_image, industry, resume_url, resume_filename,
+                    bio, profile_image, industry, resume_url, resume_filename,
                     created_at, updated_at
                 FROM users WHERE id = :user_id
             """),
