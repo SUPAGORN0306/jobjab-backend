@@ -1,4 +1,4 @@
-from flask import Flask, render_template, jsonify, request, Response
+from flask import Flask, render_template, jsonify, request, Response, g
 from flask_cors import CORS
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
@@ -19,6 +19,9 @@ from config import settings
 from extensions import db, jwt, limiter, csrf, migrate
 from logging_config import setup_logging, get_logger
 from auth import auth_bp
+
+# ---------- Sprint 2: Auth decorators ----------
+from security import require_auth, require_role, require_owner
 
 # ⭐ Supabase Storage config
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -556,7 +559,12 @@ def get_job_detail(job_id):
 # =============================================================================
 
 @app.route("/api/profile/<int:user_id>", methods=["GET"])
+@require_auth
 def get_profile(user_id):
+    # ⭐ ตรวจเจ้าของ
+    if user_id != g.user_id:
+        return {"error": {"code": "FORBIDDEN", "message": "ไม่มีสิทธิ์"}}, 403
+
     try:
         result = db.session.execute(
             text("""
@@ -578,7 +586,12 @@ def get_profile(user_id):
 
 
 @app.route("/api/profile/<int:user_id>/full", methods=["GET"])
+@require_auth
 def get_full_profile(user_id):
+    # ⭐ ตรวจเจ้าของ
+    if user_id != g.user_id:
+        return {"error": {"code": "FORBIDDEN", "message": "ไม่มีสิทธิ์"}}, 403
+
     try:
         user_result = db.session.execute(
             text("""
@@ -640,7 +653,12 @@ def get_full_profile(user_id):
 
 
 @app.route("/api/profile/<int:user_id>", methods=["PUT"])
+@require_auth
 def update_profile(user_id):
+    # ⭐ ตรวจเจ้าของ
+    if user_id != g.user_id:
+        return {"error": {"code": "FORBIDDEN", "message": "ไม่มีสิทธิ์"}}, 403
+
     try:
         data = request.json
 
@@ -770,7 +788,9 @@ def update_profile(user_id):
 # =============================================================================
 
 @app.route("/api/applications", methods=["GET"])
+@require_auth
 def get_applications():
+    # ⭐ return เฉพาะของตัวเอง
     try:
         sql = text("""
             SELECT 
@@ -780,9 +800,10 @@ def get_applications():
                 j.location, j.salary_min, j.salary_max
             FROM applications a
             LEFT JOIN job_market_data j ON a.job_id = j.id
+            WHERE a.user_id = :user_id
             ORDER BY a.applied_date DESC
         """)
-        result = db.session.execute(sql)
+        result = db.session.execute(sql, {"user_id": g.user_id})
         rows = result.mappings().all()
 
         return jsonify({
@@ -793,7 +814,12 @@ def get_applications():
 
 
 @app.route("/api/applications/user/<int:user_id>", methods=["GET"])
+@require_auth
 def get_user_applications(user_id):
+    # ⭐ ตรวจเจ้าของ
+    if user_id != g.user_id:
+        return {"error": {"code": "FORBIDDEN", "message": "ไม่มีสิทธิ์"}}, 403
+
     try:
         result = db.session.execute(
             text("""
@@ -816,6 +842,7 @@ def get_user_applications(user_id):
 
 
 @app.route("/api/applications/<int:application_id>/detail", methods=["GET"])
+@require_auth
 def get_application_detail(application_id):
     try:
         app_result = db.session.execute(
@@ -839,6 +866,10 @@ def get_application_detail(application_id):
         application = app_result.mappings().first()
         if not application:
             return {"error": "Application not found"}, 404
+
+        # ⭐ ตรวจเจ้าของ
+        if application["user_id"] != g.user_id:
+            return {"error": {"code": "FORBIDDEN", "message": "ไม่มีสิทธิ์"}}, 403
 
         skills_result = db.session.execute(
             text("""
@@ -886,6 +917,7 @@ def get_application_detail(application_id):
 
 
 @app.route("/api/applications", methods=["POST"])
+@require_auth
 def create_application():
     try:
         data = request.json
@@ -893,7 +925,8 @@ def create_application():
         if not data:
             return {"error": "No data provided"}, 400
 
-        user_id = data.get("user_id")
+        # ⭐ ใช้ g.user_id
+        user_id = g.user_id
         job_id = data.get("jobId") or data.get("job_id")
         full_name = data.get("fullName") or data.get("full_name")
         email = data.get("email")
@@ -907,15 +940,10 @@ def create_application():
         experiences = data.get("experiences", [])
         educations = data.get("educations", [])
 
-        if not user_id:
-            return {"error": "user_id is required"}, 400
         if not job_id:
             return {"error": "job_id is required"}, 400
         if not full_name or not email:
             return {"error": "full_name and email are required"}, 400
-
-        if user_id == 1:
-            return {"error": "Please login first to submit application"}, 403
 
         if not resume_url:
             return {"error": "Please upload a resume first"}, 400
@@ -1061,15 +1089,10 @@ def create_application():
 # =============================================================================
 
 @app.route("/api/favorites")
+@require_auth
 def get_favorites():
     try:
-        user_id = request.args.get("user_id", type=int)
-
-        if not user_id:
-            return {"error": "user_id is required"}, 400
-
-        if user_id == 1:
-            return {"favorites": []}
+        user_id = g.user_id
 
         result = db.session.execute(
             text("""
@@ -1094,18 +1117,14 @@ def get_favorites():
 
 
 @app.route("/api/favorites/toggle", methods=["POST"])
+@require_auth
 def toggle_favorite():
-    data = request.json
-    user_id = data.get("user_id")
+    user_id = g.user_id
+    data = request.json or {}
     job_id = data.get("job_id")
 
-    if not user_id:
-        return {"error": "user_id is required"}, 400
     if not job_id:
         return {"error": "job_id is required"}, 400
-
-    if user_id == 1:
-        return {"error": "Please login first to save favorites"}, 403
 
     try:
         job_check = db.session.execute(
@@ -1275,12 +1294,11 @@ def tables_page():
 # =============================================================================
 
 @app.route("/api/employer/jobs", methods=["GET"])
+@require_auth
+@require_role("employer")
 def get_employer_jobs():
     try:
-        user_id = request.args.get("user_id", type=int)
-
-        if not user_id:
-            return {"error": "user_id is required"}, 400
+        user_id = g.user_id
 
         result = db.session.execute(
             text("""
@@ -1331,11 +1349,13 @@ def get_employer_jobs():
 
 
 @app.route("/api/employer/jobs", methods=["POST"])
+@require_auth
+@require_role("employer")
 def create_employer_job():
     try:
         data = request.json
 
-        user_id = data.get("user_id")
+        user_id = g.user_id
         job_title = (data.get("job_title") or "").strip()
         company_name = (data.get("company_name") or "").strip()
         location = (data.get("location") or "").strip()
@@ -1351,8 +1371,6 @@ def create_employer_job():
         responsibilities = (data.get("responsibilities") or "").strip()
         requirements = (data.get("requirements") or "").strip()
 
-        if not user_id:
-            return {"error": "user_id is required"}, 400
         if not job_title:
             return {"error": "Job title is required"}, 400
         if job_title not in ALLOWED_JOB_TITLES:
@@ -1364,17 +1382,6 @@ def create_employer_job():
             }, 400
         if not company_name:
             return {"error": "Company name is required"}, 400
-
-        check = db.session.execute(
-            text("""
-                SELECT 1 FROM user_roles 
-                WHERE user_id = :uid AND role = 'employer'
-            """),
-            {"uid": user_id}
-        ).first()
-
-        if not check:
-            return {"error": "User is not an employer"}, 403
 
         result = db.session.execute(
             text("""
@@ -1437,14 +1444,20 @@ def create_employer_job():
 
 
 @app.route("/api/employer/jobs/<int:job_id>/applications", methods=["GET"])
+@require_auth
+@require_role("employer")
 def get_job_applications(job_id):
     try:
         job_check = db.session.execute(
-            text("SELECT id, job_title FROM job_market_data WHERE id = :jid"),
+            text("SELECT id, job_title, posted_by_user_id FROM job_market_data WHERE id = :jid"),
             {"jid": job_id}
         ).first()
         if not job_check:
             return {"error": "Job not found"}, 404
+
+        # ⭐ ตรวจว่าเป็นเจ้าของ job
+        if job_check[2] != g.user_id:
+            return {"error": {"code": "FORBIDDEN", "message": "ไม่มีสิทธิ์"}}, 403
 
         result = db.session.execute(
             text("""
@@ -1494,6 +1507,8 @@ def get_job_applications(job_id):
 
 
 @app.route("/api/employer/applications/<int:application_id>/detail", methods=["GET"])
+@require_auth
+@require_role("employer")
 def get_application_snapshot(application_id):
     try:
         app_result = db.session.execute(
@@ -1518,6 +1533,15 @@ def get_application_snapshot(application_id):
         application = app_result.mappings().first()
         if not application:
             return {"error": "Application not found"}, 404
+
+        # ⭐ ตรวจว่า employer เป็นเจ้าของ job ที่ application นี้สมัคร
+        job_owner = db.session.execute(
+            text("SELECT posted_by_user_id FROM job_market_data WHERE id = :jid"),
+            {"jid": application["job_id"]}
+        ).first()
+
+        if not job_owner or job_owner[0] != g.user_id:
+            return {"error": {"code": "FORBIDDEN", "message": "ไม่มีสิทธิ์"}}, 403
 
         skills_result = db.session.execute(
             text("""
@@ -1566,6 +1590,8 @@ def get_application_snapshot(application_id):
 
 
 @app.route("/api/employer/applications/<int:application_id>/status", methods=["PUT"])
+@require_auth
+@require_role("employer")
 def update_application_status(application_id):
     try:
         data = request.json
@@ -1575,12 +1601,22 @@ def update_application_status(application_id):
         if new_status not in allowed:
             return {"error": f"Invalid status. Allowed: {', '.join(allowed)}"}, 400
 
+        # ⭐ ดึง application + job_id
         check = db.session.execute(
-            text("SELECT id, status FROM applications WHERE id = :aid"),
+            text("SELECT id, status, job_id FROM applications WHERE id = :aid"),
             {"aid": application_id}
         ).first()
         if not check:
             return {"error": "Application not found"}, 404
+
+        # ⭐ ตรวจว่า employer เป็นเจ้าของ job
+        job_owner = db.session.execute(
+            text("SELECT posted_by_user_id FROM job_market_data WHERE id = :jid"),
+            {"jid": check[2]}
+        ).first()
+
+        if not job_owner or job_owner[0] != g.user_id:
+            return {"error": {"code": "FORBIDDEN", "message": "ไม่มีสิทธิ์"}}, 403
 
         db.session.execute(
             text("""
@@ -1650,14 +1686,11 @@ def get_skills():
 # =============================================================================
 
 @app.route("/api/upload/resume", methods=["POST"])
+@require_auth
 def upload_resume():
     """อัปโหลด Resume (PDF เท่านั้น) → Supabase Storage"""
     try:
-        user_id = request.form.get("user_id")
-        if not user_id:
-            return {"error": "user_id is required"}, 400
-
-        user_id = int(user_id)
+        user_id = g.user_id
 
         if "resume" not in request.files:
             return {"error": "No file provided"}, 400
@@ -1730,8 +1763,13 @@ def upload_resume():
 
 
 @app.route("/api/resume/<int:user_id>", methods=["DELETE"])
+@require_auth
 def delete_resume(user_id):
     """ลบ Resume (จาก Supabase + DB)"""
+    # ⭐ ตรวจว่าเป็นเจ้าของ
+    if user_id != g.user_id:
+        return {"error": {"code": "FORBIDDEN", "message": "ไม่มีสิทธิ์"}}, 403
+
     try:
         old = db.session.execute(
             text("SELECT resume_url FROM users WHERE id = :uid"),
@@ -1771,14 +1809,11 @@ def delete_resume(user_id):
 # =============================================================================
 
 @app.route("/api/upload/avatar", methods=["POST"])
+@require_auth
 def upload_avatar():
     """อัปโหลด Avatar → Supabase Storage"""
     try:
-        user_id = request.form.get("user_id")
-        if not user_id:
-            return {"error": "user_id is required"}, 400
-
-        user_id = int(user_id)
+        user_id = g.user_id
 
         if "avatar" not in request.files:
             return {"error": "No file provided"}, 400
@@ -1851,14 +1886,12 @@ def upload_avatar():
 # =============================================================================
 
 @app.route("/api/upload/company-logo", methods=["POST"])
+@require_auth
+@require_role("employer")
 def upload_company_logo():
     """อัปโหลด Company Logo → Supabase Storage"""
     try:
-        user_id = request.form.get("user_id")
-        if not user_id:
-            return {"error": "user_id is required"}, 400
-
-        user_id = int(user_id)
+        user_id = g.user_id
 
         if "logo" not in request.files:
             return {"error": "No file provided"}, 400
@@ -1925,11 +1958,11 @@ def upload_company_logo():
 
 
 @app.route("/api/employer/profile", methods=["GET"])
+@require_auth
+@require_role("employer")
 def get_employer_profile():
     try:
-        user_id = request.args.get("user_id", type=int)
-        if not user_id:
-            return {"error": "user_id is required"}, 400
+        user_id = g.user_id
 
         result = db.session.execute(
             text("""

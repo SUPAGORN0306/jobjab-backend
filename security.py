@@ -71,7 +71,7 @@ def rehash_if_needed(plain: str, hashed: str) -> str | None:
 def require_auth(fn: Callable) -> Callable:
     """
     Decorator: ต้อง login (มี valid JWT)
-    เก็บ user_id ใน g.user_id
+    เก็บ user_id + role ใน g
     """
     @wraps(fn)
     def wrapper(*args, **kwargs):
@@ -81,7 +81,13 @@ def require_auth(fn: Callable) -> Callable:
             return jsonify({
                 "error": {"code": "UNAUTHORIZED", "message": "ไม่พบข้อมูลผู้ใช้"}
             }), 401
+
+        # ดึง role จาก JWT claims
+        from flask_jwt_extended import get_jwt
+        claims = get_jwt()
+
         g.user_id = int(user_id)
+        g.user_role = claims.get("role", "candidate")
         return fn(*args, **kwargs)
     return wrapper
 
