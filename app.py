@@ -1386,6 +1386,165 @@ def get_employer_jobs():
         return {"error": str(e)}, 500
 
 
+@app.route("/api/employer/analytics", methods=["GET"])
+@require_auth
+@require_role("employer")
+def get_employer_analytics():
+    """
+    Employer analytics — aggregate stats for dashboard
+    Returns:
+        summary: total jobs, applicants, active jobs, response rate
+        applicants_by_date: 30 days timeline
+        applicants_by_status: breakdown by status
+        top_jobs: top 5 jobs by applicant count
+    """
+    try:
+        user_id = g.user_id
+
+        # ============================================================
+        # 1. Summary stats
+        # ============================================================
+        summary_row = db.session.execute(
+            text("""
+                SELECT
+                    COUNT(DISTINCT j.id) AS total_jobs,
+                    COUNT(a.id) AS total_applicants
+                FROM job_market_data j
+                LEFT JOIN applications a ON j.id = a.job_id
+                WHERE j.posted_by_user_id = :uid
+            """),
+            {"uid": user_id}
+        ).mappings().first()
+
+        total_jobs = summary_row["total_jobs"] or 0
+        total_applicants = summary_row["total_applicants"] or 0
+
+        # Active jobs — count jobs ที่มีผู้สมัคร
+        active_row = db.session.execute(
+            text("""
+                SELECT COUNT(DISTINCT j.id) AS active_jobs
+                FROM job_market_data j
+                INNER JOIN applications a ON j.id = a.job_id
+                WHERE j.posted_by_user_id = :uid
+            """),
+            {"uid": user_id}
+        ).mappings().first()
+        active_jobs = active_row["active_jobs"] or 0
+
+        # Response rate — % ของ applications ที่ status != applied
+        responded_row = db.session.execute(
+            text("""
+                SELECT COUNT(a.id) AS responded
+                FROM job_market_data j
+                INNER JOIN applications a ON j.id = a.job_id
+                WHERE j.posted_by_user_id = :uid
+                  AND a.status != 'applied'
+            """),
+            {"uid": user_id}
+        ).mappings().first()
+        responded = responded_row["responded"] or 0
+        response_rate = round((responded / total_applicants) * 100) if total_applicants > 0 else 0
+
+        # ============================================================
+        # 2. Applicants by date (30 days)
+        # ============================================================
+        date_rows = db.session.execute(
+            text("""
+                SELECT
+                    DATE(a.applied_date) AS day,
+                    COUNT(a.id) AS count
+                FROM job_market_data j
+                INNER JOIN applications a ON j.id = a.job_id
+                WHERE j.posted_by_user_id = :uid
+                  AND a.applied_date >= NOW() - INTERVAL '30 days'
+                GROUP BY DATE(a.applied_date)
+                ORDER BY day ASC
+            """),
+            {"uid": user_id}
+        ).mappings().all()
+
+        applicants_by_date = [
+            {
+                "date": row["day"].isoformat() if row["day"] else None,
+                "count": row["count"],
+            }
+            for row in date_rows
+        ]
+
+        # ============================================================
+        # 3. Applicants by status
+        # ============================================================
+        status_rows = db.session.execute(
+            text("""
+                SELECT
+                    a.status,
+                    COUNT(a.id) AS count
+                FROM job_market_data j
+                INNER JOIN applications a ON j.id = a.job_id
+                WHERE j.posted_by_user_id = :uid
+                GROUP BY a.status
+                ORDER BY a.status
+            """),
+            {"uid": user_id}
+        ).mappings().all()
+
+        applicants_by_status = [
+            {"status": row["status"], "count": row["count"]}
+            for row in status_rows
+        ]
+
+        # ============================================================
+        # 4. Top 5 jobs by applicant count
+        # ============================================================
+        top_rows = db.session.execute(
+            text("""
+                SELECT
+                    j.id,
+                    j.job_title,
+                    j.company_name,
+                    j.posted_date,
+                    COUNT(a.id) AS applicant_count
+                FROM job_market_data j
+                LEFT JOIN applications a ON j.id = a.job_id
+                WHERE j.posted_by_user_id = :uid
+                GROUP BY j.id
+                ORDER BY applicant_count DESC, j.posted_date DESC
+                LIMIT 5
+            """),
+            {"uid": user_id}
+        ).mappings().all()
+
+        top_jobs = [
+            {
+                "id": row["id"],
+                "job_title": row["job_title"],
+                "company_name": row["company_name"],
+                "applicants": row["applicant_count"],
+                "posted_date": row["posted_date"].isoformat() if row["posted_date"] else None,
+            }
+            for row in top_rows
+        ]
+
+        # ============================================================
+        # Return
+        # ============================================================
+        return {
+            "summary": {
+                "total_jobs": total_jobs,
+                "total_applicants": total_applicants,
+                "active_jobs": active_jobs,
+                "response_rate": response_rate,
+            },
+            "applicants_by_date": applicants_by_date,
+            "applicants_by_status": applicants_by_status,
+            "top_jobs": top_jobs,
+        }, 200
+
+    except Exception as e:
+        logger.error("get_employer_analytics_failed", error=str(e), exc_info=True)
+        return {"error": {"code": "INTERNAL_ERROR", "message": "เกิดข้อผิดพลาด"}}, 500
+
+
 @app.route("/api/employer/jobs", methods=["POST"])
 @require_auth
 @require_role("employer")
