@@ -5,6 +5,7 @@ from .profile import bp as profile_bp
 from .skills import bp as skills_bp
 from .applications import bp as applications_bp
 from .favorites import bp as favorites_bp
+from .employer_jobs import bp as employer_jobs_bp
 
 __all__ = [
     "auth_bp",
@@ -13,4 +14,5 @@ __all__ = [
     "skills_bp",
     "applications_bp",
     "favorites_bp",
+    "employer_jobs_bp",
 ]
