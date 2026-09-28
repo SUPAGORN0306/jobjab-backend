@@ -6,6 +6,7 @@ Routes:
 - GET /api/profile/<int:user_id>/full
 - PUT /api/profile/<int:user_id>
 """
+from sqlalchemy import text
 from flask import Blueprint, request, g
 
 from core.extensions import db

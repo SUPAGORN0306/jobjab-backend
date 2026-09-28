@@ -7,6 +7,7 @@ Routes:
 - GET /api/applications/user/<int:user_id>
 - GET /api/applications/<int:application_id>/detail
 """
+from sqlalchemy import text
 from flask import Blueprint, request, jsonify, g
 
 from core.extensions import db

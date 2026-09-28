@@ -4,6 +4,7 @@ blueprints/skills.py — Skills routes
 Routes:
 - GET /api/skills
 """
+from sqlalchemy import text
 from flask import Blueprint
 
 from core.extensions import db

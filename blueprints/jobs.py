@@ -5,6 +5,7 @@ Routes:
 - GET /api/jobs
 - GET /api/jobs/<int:job_id>
 """
+from sqlalchemy import text
 from flask import Blueprint, request
 
 from core.extensions import db

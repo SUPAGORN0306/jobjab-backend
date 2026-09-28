@@ -5,6 +5,7 @@ Routes:
 - GET /api/favorites
 - POST /api/favorites/toggle
 """
+from sqlalchemy import text
 from flask import Blueprint, request, g
 
 from core.extensions import db
