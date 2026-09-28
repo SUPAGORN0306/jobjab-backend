@@ -1590,151 +1590,154 @@ def get_employer_jobs():
 @require_auth
 @require_role("employer")
 def get_employer_analytics():
-    """
-    Employer analytics — aggregate stats for dashboard
-    Returns:
-        summary: total jobs, applicants, active jobs, response rate
-        applicants_by_date: 30 days timeline
-        applicants_by_status: breakdown by status
-        top_jobs: top 5 jobs by applicant count
-    """
+    """Employer analytics — period-aware aggregate stats."""
     try:
         user_id = g.user_id
 
-        # ============================================================
-        # 1. Summary stats
-        # ============================================================
+        period_raw = request.args.get("period", "30")
+        period = period_raw if period_raw in ("7", "30", "90") else "30"
+        days = int(period)
+
         summary_row = db.session.execute(
             text("""
                 SELECT
                     COUNT(DISTINCT j.id) AS total_jobs,
-                    COUNT(a.id) AS total_applicants
+                    COUNT(DISTINCT CASE WHEN COALESCE(j.status, 'active') = 'active'
+                                        THEN j.id END) AS active_jobs
                 FROM job_market_data j
-                LEFT JOIN applications a ON j.id = a.job_id
                 WHERE j.posted_by_user_id = :uid
             """),
             {"uid": user_id}
         ).mappings().first()
 
-        total_jobs = summary_row["total_jobs"] or 0
-        total_applicants = summary_row["total_applicants"] or 0
+        total_jobs  = summary_row["total_jobs"]  or 0
+        active_jobs = summary_row["active_jobs"] or 0
 
-        # Active jobs — count jobs ที่มีผู้สมัคร
-        active_row = db.session.execute(
-            text("""
-                SELECT COUNT(DISTINCT j.id) AS active_jobs
-                FROM job_market_data j
-                INNER JOIN applications a ON j.id = a.job_id
-                WHERE j.posted_by_user_id = :uid
-            """),
-            {"uid": user_id}
-        ).mappings().first()
-        active_jobs = active_row["active_jobs"] or 0
-
-        # Response rate — % ของ applications ที่ employer ตอบกลับเชิงบวก
-        # (reviewing + interview) — ไม่นับ rejected
-        responded_row = db.session.execute(
-            text("""
-                SELECT COUNT(a.id) AS responded
-                FROM job_market_data j
-                INNER JOIN applications a ON j.id = a.job_id
-                WHERE j.posted_by_user_id = :uid
-                  AND a.status IN ('reviewing', 'interview')
-            """),
-            {"uid": user_id}
-        ).mappings().first()
-        responded = responded_row["responded"] or 0
-        response_rate = round((responded / total_applicants) * 100) if total_applicants > 0 else 0
-
-        # ============================================================
-        # 2. Applicants by date (30 days)
-        # ============================================================
-        date_rows = db.session.execute(
+        app_row = db.session.execute(
             text("""
                 SELECT
-                    DATE(a.applied_date) AS day,
-                    COUNT(a.id) AS count
+                    COUNT(a.id) AS total_applicants,
+                    COUNT(CASE WHEN a.status IN ('reviewing','interview') THEN 1 END) AS responded,
+                    COUNT(CASE WHEN a.status = 'interview' THEN 1 END) AS interviews,
+                    COUNT(CASE WHEN a.status = 'rejected'  THEN 1 END) AS rejected
                 FROM job_market_data j
                 INNER JOIN applications a ON j.id = a.job_id
                 WHERE j.posted_by_user_id = :uid
-                  AND a.applied_date >= NOW() - INTERVAL '30 days'
-                GROUP BY DATE(a.applied_date)
-                ORDER BY day ASC
+                  AND a.applied_date >= NOW() - (:days || ' days')::interval
             """),
-            {"uid": user_id}
+            {"uid": user_id, "days": days}
+        ).mappings().first()
+
+        total_applicants = app_row["total_applicants"] or 0
+        responded        = app_row["responded"]        or 0
+        interviews       = app_row["interviews"]       or 0
+        rejected         = app_row["rejected"]         or 0
+
+        response_rate = (
+            round((responded / total_applicants) * 100) if total_applicants else 0
+        )
+
+        prev_row = db.session.execute(
+            text("""
+                SELECT COUNT(a.id) AS prev_count
+                FROM job_market_data j
+                INNER JOIN applications a ON j.id = a.job_id
+                WHERE j.posted_by_user_id = :uid
+                  AND a.applied_date >= NOW() - ((:days * 2) || ' days')::interval
+                  AND a.applied_date <  NOW() - (:days || ' days')::interval
+            """),
+            {"uid": user_id, "days": days}
+        ).mappings().first()
+
+        prev_count = prev_row["prev_count"] or 0
+        if prev_count > 0:
+            applicants_delta = round(((total_applicants - prev_count) / prev_count) * 100)
+        else:
+            applicants_delta = 100 if total_applicants > 0 else 0
+
+        timeline_rows = db.session.execute(
+            text("""
+                SELECT
+                    d::date AS date,
+                    COALESCE(cnt.c, 0) AS count
+                FROM generate_series(
+                    (NOW()::date - (:days - 1)::int),
+                    NOW()::date,
+                    '1 day'
+                ) AS d
+                LEFT JOIN (
+                    SELECT DATE(a.applied_date) AS day, COUNT(*) AS c
+                    FROM job_market_data j
+                    INNER JOIN applications a ON j.id = a.job_id
+                    WHERE j.posted_by_user_id = :uid
+                      AND a.applied_date >= NOW() - (:days || ' days')::interval
+                    GROUP BY DATE(a.applied_date)
+                ) cnt ON cnt.day = d::date
+                ORDER BY d
+            """),
+            {"uid": user_id, "days": days}
         ).mappings().all()
 
         applicants_by_date = [
-            {
-                "date": row["day"].isoformat() if row["day"] else None,
-                "count": row["count"],
-            }
-            for row in date_rows
+            {"date": row["date"].isoformat() if row["date"] else None,
+             "count": int(row["count"])}
+            for row in timeline_rows
         ]
 
-        # ============================================================
-        # 3. Applicants by status
-        # ============================================================
         status_rows = db.session.execute(
             text("""
-                SELECT
-                    a.status,
-                    COUNT(a.id) AS count
+                SELECT a.status, COUNT(*) AS count
                 FROM job_market_data j
                 INNER JOIN applications a ON j.id = a.job_id
                 WHERE j.posted_by_user_id = :uid
+                  AND a.applied_date >= NOW() - (:days || ' days')::interval
                 GROUP BY a.status
-                ORDER BY a.status
             """),
-            {"uid": user_id}
+            {"uid": user_id, "days": days}
         ).mappings().all()
 
         applicants_by_status = [
-            {"status": row["status"], "count": row["count"]}
+            {"status": row["status"], "count": int(row["count"])}
             for row in status_rows
         ]
 
-        # ============================================================
-        # 4. Top 5 jobs by applicant count
-        # ============================================================
         top_rows = db.session.execute(
             text("""
                 SELECT
-                    j.id,
-                    j.job_title,
-                    j.company_name,
-                    j.posted_date,
+                    j.id, j.job_title, j.company_name,
+                    COALESCE(j.status, 'active') AS status,
                     COUNT(a.id) AS applicant_count
                 FROM job_market_data j
-                LEFT JOIN applications a ON j.id = a.job_id
+                LEFT JOIN applications a
+                    ON a.job_id = j.id
+                   AND a.applied_date >= NOW() - (:days || ' days')::interval
                 WHERE j.posted_by_user_id = :uid
-                GROUP BY j.id
-                ORDER BY applicant_count DESC, j.posted_date DESC
+                GROUP BY j.id, j.job_title, j.company_name, j.status
+                ORDER BY applicant_count DESC, j.id DESC
                 LIMIT 5
             """),
-            {"uid": user_id}
+            {"uid": user_id, "days": days}
         ).mappings().all()
 
         top_jobs = [
-            {
-                "id": row["id"],
-                "job_title": row["job_title"],
-                "company_name": row["company_name"],
-                "applicants": row["applicant_count"],
-                "posted_date": row["posted_date"].isoformat() if row["posted_date"] else None,
-            }
+            {"id": row["id"],
+             "job_title": row["job_title"],
+             "company_name": row["company_name"],
+             "status": row["status"],
+             "applicants": int(row["applicant_count"])}
             for row in top_rows
         ]
 
-        # ============================================================
-        # Return
-        # ============================================================
         return {
+            "period": days,
             "summary": {
                 "total_jobs": total_jobs,
-                "total_applicants": total_applicants,
                 "active_jobs": active_jobs,
+                "total_applicants": total_applicants,
                 "response_rate": response_rate,
+                "applicants_delta": applicants_delta,
+                "interviews": interviews,
+                "rejected": rejected,
             },
             "applicants_by_date": applicants_by_date,
             "applicants_by_status": applicants_by_status,
@@ -1744,8 +1747,6 @@ def get_employer_analytics():
     except Exception as e:
         logger.error("get_employer_analytics_failed", error=str(e), exc_info=True)
         return {"error": {"code": "INTERNAL_ERROR", "message": "เกิดข้อผิดพลาด"}}, 500
-
-
 @app.route("/api/employer/jobs", methods=["POST"])
 @require_auth
 @require_role("employer")
@@ -2768,6 +2769,211 @@ def get_match_score(job_id):
         return {"error": str(e)}, 500
 
 
+# ═══════════════════════════════════════════════════════════
+# EMPLOYER ANALYTICS EXPORT (full data)
+# ═══════════════════════════════════════════════════════════
+
+@app.route("/api/employer/analytics/export", methods=["GET"])
+@require_auth
+@require_role("employer")
+def export_employer_analytics():
+    """
+    Full export data for CSV — summary + applicants + top jobs
+    """
+    try:
+        user_id = g.user_id
+
+        period_raw = request.args.get("period", "30")
+        period = period_raw if period_raw in ("7", "30", "90") else "30"
+        days = int(period)
+
+        # ── 1. Summary ──
+        summary_row = db.session.execute(
+            text("""
+                SELECT
+                    COUNT(DISTINCT j.id) AS total_jobs,
+                    COUNT(DISTINCT CASE WHEN COALESCE(j.status, 'active') = 'active'
+                                        THEN j.id END) AS active_jobs
+                FROM job_market_data j
+                WHERE j.posted_by_user_id = :uid
+            """),
+            {"uid": user_id}
+        ).mappings().first()
+
+        app_row = db.session.execute(
+            text("""
+                SELECT
+                    COUNT(a.id) AS total_applicants,
+                    COUNT(CASE WHEN LOWER(a.status) IN ('reviewing','interview') THEN 1 END) AS responded,
+                    COUNT(CASE WHEN LOWER(a.status) = 'interview' THEN 1 END) AS interviews,
+                    COUNT(CASE WHEN LOWER(a.status) = 'rejected'  THEN 1 END) AS rejected
+                FROM job_market_data j
+                INNER JOIN applications a ON j.id = a.job_id
+                WHERE j.posted_by_user_id = :uid
+                  AND a.applied_date >= NOW() - (:days || ' days')::interval
+            """),
+            {"uid": user_id, "days": days}
+        ).mappings().first()
+
+        total_applicants = app_row["total_applicants"] or 0
+        responded        = app_row["responded"]        or 0
+        interviews       = app_row["interviews"]       or 0
+        rejected         = app_row["rejected"]         or 0
+
+        response_rate = round((responded / total_applicants) * 100) if total_applicants else 0
+        interview_rate = round((interviews / total_applicants) * 100) if total_applicants else 0
+
+        # ── 2. Applicants list (full detail) ──
+        applicants_rows = db.session.execute(
+            text("""
+                SELECT
+                    a.id,
+                    a.full_name,
+                    a.email,
+                    a.phone,
+                    a.location,
+                    a.status,
+                    a.applied_date,
+                    a.resume_url,
+                    a.resume_filename,
+                    j.id AS job_id,
+                    j.job_title,
+                    j.company_name,
+                    j.location AS job_location,
+                    j.skills_required,
+                    j.experience_level,
+                    j.industry
+                FROM applications a
+                INNER JOIN job_market_data j ON j.id = a.job_id
+                WHERE j.posted_by_user_id = :uid
+                  AND a.applied_date >= NOW() - (:days || ' days')::interval
+                ORDER BY a.applied_date DESC
+            """),
+            {"uid": user_id, "days": days}
+        ).mappings().all()
+
+        # ── Bulk fetch: skills + experience for all applicants ──
+        applicant_ids = [r["id"] for r in applicants_rows]
+
+        user_map = {}
+        if applicant_ids:
+            uid_rows = db.session.execute(
+                text("SELECT a.id AS app_id, a.user_id FROM applications a WHERE a.id = ANY(:ids)"),
+                {"ids": applicant_ids}
+            ).mappings().all()
+            user_map = {r["app_id"]: r["user_id"] for r in uid_rows}
+
+        user_ids = list(set(user_map.values()))
+
+        skills_map = {}
+        if user_ids:
+            skill_rows = db.session.execute(
+                text("SELECT user_id, skill_name FROM user_skills WHERE user_id = ANY(:uids)"),
+                {"uids": user_ids}
+            ).mappings().all()
+            for r in skill_rows:
+                skills_map.setdefault(r["user_id"], []).append(r["skill_name"])
+
+        years_map = {}
+        if user_ids:
+            years_rows = db.session.execute(
+                text("SELECT user_id, COALESCE(SUM(EXTRACT(EPOCH FROM (COALESCE(end_date, NOW()) - start_date)) / (365.25 * 24 * 3600)), 0) AS total_years FROM user_experience WHERE user_id = ANY(:uids) GROUP BY user_id"),
+                {"uids": user_ids}
+            ).mappings().all()
+            years_map = {r["user_id"]: float(r["total_years"] or 0) for r in years_rows}
+
+        applicants = []
+        for row in applicants_rows:
+            try:
+                uid = user_map.get(row["id"])
+                cand_data = {
+                    "skills": skills_map.get(uid, []),
+                    "total_years": years_map.get(uid, 0),
+                    "industry": "",
+                    "location": row["location"] or "",
+                }
+
+                job_dict = {
+                    "skills_required": row["skills_required"],
+                    "experience_level": row["experience_level"],
+                    "industry": row["industry"],
+                    "location": row["job_location"],
+                }
+
+                match = calculate_match_score_v2(job_dict, cand_data)
+                match_score = match["overall"]
+                matched_skills = ", ".join(match.get("matched_skills", []))
+            except Exception as e:
+                logger.warning("match_calc_failed", app_id=row["id"], error=str(e))
+                match_score = 0
+                matched_skills = ""
+
+            applicants.append({
+                "id": row["id"],
+                "full_name": row["full_name"],
+                "email": row["email"],
+                "phone": row["phone"] or "",
+                "location": row["location"] or "",
+                "job_title": row["job_title"],
+                "company_name": row["company_name"],
+                "status": row["status"],
+                "applied_date": row["applied_date"].isoformat() if row["applied_date"] else "",
+                "match_score": match_score,
+                "matched_skills": matched_skills,
+                "resume_url": row["resume_url"] or "",
+                "resume_filename": row["resume_filename"] or "",
+            })
+
+        # ── 3. Top jobs ──
+        top_rows = db.session.execute(
+            text("""
+                SELECT
+                    j.id, j.job_title, j.company_name,
+                    COALESCE(j.status, 'active') AS status,
+                    COUNT(a.id) AS applicant_count
+                FROM job_market_data j
+                LEFT JOIN applications a
+                    ON a.job_id = j.id
+                   AND a.applied_date >= NOW() - (:days || ' days')::interval
+                WHERE j.posted_by_user_id = :uid
+                GROUP BY j.id, j.job_title, j.company_name, j.status
+                ORDER BY applicant_count DESC, j.id DESC
+            """),
+            {"uid": user_id, "days": days}
+        ).mappings().all()
+
+        top_jobs = [
+            {
+                "id": r["id"],
+                "job_title": r["job_title"],
+                "company_name": r["company_name"],
+                "status": r["status"],
+                "applicants": int(r["applicant_count"]),
+            }
+            for r in top_rows
+        ]
+
+        return {
+            "period": days,
+            "generated_at": datetime.utcnow().isoformat() + "Z",
+            "summary": {
+                "total_jobs": summary_row["total_jobs"] or 0,
+                "active_jobs": summary_row["active_jobs"] or 0,
+                "total_applicants": total_applicants,
+                "response_rate": response_rate,
+                "interview_rate": interview_rate,
+                "interviews": interviews,
+                "rejected": rejected,
+            },
+            "applicants": applicants,
+            "top_jobs": top_jobs,
+        }, 200
+
+    except Exception as e:
+        logger.error("export_analytics_failed", error=str(e), exc_info=True)
+        return {"error": {"code": "INTERNAL_ERROR", "message": str(e)}}, 500
+
+
 # =============================================================================
 # ERROR HANDLERS
 # =============================================================================
@@ -2845,3 +3051,4 @@ if __name__ == "__main__":
 
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
+
