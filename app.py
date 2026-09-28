@@ -1336,7 +1336,7 @@ def get_favorites():
                     j.job_title, j.company_name, j.location,
                     j.salary_min, j.salary_max, j.industry,
                     j.experience_level, j.employment_type,
-                    j.skills_required
+                    j.skills_required, j.tools_preferred
                 FROM favorites f
                 LEFT JOIN job_market_data j ON f.job_id = j.id
                 WHERE f.user_id = :user_id
@@ -1345,7 +1345,41 @@ def get_favorites():
             {"user_id": user_id}
         )
         rows = result.mappings().all()
-        return {"favorites": [serialize_row(row) for row in rows]}
+
+        # ── Load user data once for match scoring ──
+        user_data = load_user_data(user_id, db.session)
+
+        favorites = []
+        for row in rows:
+            fav_dict = serialize_row(row)
+
+            # Calculate match score
+            try:
+                job_dict = {
+                    "skills_required": row.get("skills_required"),
+                    "experience_level": row.get("experience_level"),
+                    "industry": row.get("industry"),
+                    "location": row.get("location"),
+                }
+                match = calculate_match_score_v2(job_dict, user_data)
+                fav_dict["match_score"] = match["overall"]
+                fav_dict["match_breakdown"] = {
+                    "skills": match["skills_match"],
+                    "experience": match["experience_match"],
+                    "industry": match["industry_match"],
+                }
+                fav_dict["matched_skills"] = match.get("matched_skills", [])
+                fav_dict["missing_skills"] = match.get("missing_skills", [])
+            except Exception as e:
+                logger.warning("favorite_match_calc_failed", job_id=row.get("job_id"), error=str(e))
+                fav_dict["match_score"] = 0
+                fav_dict["match_breakdown"] = {"skills": 0, "experience": 0, "industry": 0}
+                fav_dict["matched_skills"] = []
+                fav_dict["missing_skills"] = []
+
+            favorites.append(fav_dict)
+
+        return {"favorites": favorites}
     except Exception as e:
         logger.error("get_favorites_failed", error=str(e), exc_info=True)
         return {"error": str(e)}, 500
