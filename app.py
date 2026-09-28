@@ -78,16 +78,19 @@ CORS(
 app.config["SQLALCHEMY_DATABASE_URI"] = os.getenv("DATABASE_URL")
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 
-app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {
-    "pool_pre_ping": True,
-    "pool_recycle": 300,
-    "pool_size": 5,
-    "max_overflow": 2,
-    "connect_args": {
-        "sslmode": "require",
-        "connect_timeout": 10,
-    },
-}
+# ⭐ Pool options เฉพาะ Postgres — SQLite (test) ไม่รองรับ
+_db_url = app.config["SQLALCHEMY_DATABASE_URI"] or ""
+if _db_url.startswith(("postgresql://", "postgres://")):
+    app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {
+        "pool_pre_ping": True,
+        "pool_recycle": 300,
+        "pool_size": 5,
+        "max_overflow": 2,
+        "connect_args": {
+            "sslmode": "require",
+            "connect_timeout": 10,
+        },
+    }
 
 db.init_app(app)
 

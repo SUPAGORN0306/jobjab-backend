@@ -1,5 +1,10 @@
 """test_profile.py — Profile CRUD + ownership"""
 
+import pytest
+
+# ⭐ Mark ทั้งไฟล์เป็น integration (ต้องการ DB จริง)
+pytestmark = pytest.mark.integration
+
 
 class TestProfileRead:
 

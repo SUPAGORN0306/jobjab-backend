@@ -1,5 +1,10 @@
 """test_favorites.py — Favorites toggle + list"""
 
+import pytest
+
+# ⭐ Mark ทั้งไฟล์เป็น integration (ต้องการ DB จริง)
+pytestmark = pytest.mark.integration
+
 
 class TestFavorites:
 

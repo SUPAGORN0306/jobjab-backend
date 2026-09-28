@@ -395,3 +395,30 @@ def _clear_client_cookies(client):
             client.cookie_jar.clear()
         except AttributeError:
             pass
+
+
+# ============================================================
+# AUTO-SKIP integration tests ถ้าใช้ SQLite (ไม่มี tables)
+# ============================================================
+def pytest_collection_modifyitems(config, items):
+    """
+    Skip tests ที่ต้อง DB จริง ถ้าใช้ SQLite in-memory
+    
+    วิธีใช้:
+    - Mark test ด้วย @pytest.mark.integration
+    - หรือ mark ทั้ง class/module
+    - ถ้า DATABASE_URL เป็น sqlite → skip อัตโนมัติ
+    """
+    import os
+    db_url = os.environ.get("DATABASE_URL", "")
+    
+    if db_url.startswith("sqlite"):
+        skip_reason = (
+            "Integration test ต้องใช้ DB จริง (SQLite in-memory ไม่มี tables). "
+            "TODO: ย้ายไป Docker Postgres หรือ Supabase test"
+        )
+        skip_marker = pytest.mark.skip(reason=skip_reason)
+        
+        for item in items:
+            if "integration" in item.keywords:
+                item.add_marker(skip_marker)

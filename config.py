@@ -87,8 +87,8 @@ class Settings(BaseSettings):
     @field_validator("DATABASE_URL")
     @classmethod
     def _validate_db(cls, v: str) -> str:
-        if not v.startswith(("postgresql://", "postgres://")):
-            raise ValueError("DATABASE_URL ต้องขึ้นต้นด้วย postgresql://")
+        if not v.startswith(("postgresql://", "postgres://", "sqlite://")):
+            raise ValueError("DATABASE_URL ต้องขึ้นต้นด้วย postgresql:// หรือ sqlite:// (test)")
         return v
 
     @field_validator("SUPABASE_URL")
