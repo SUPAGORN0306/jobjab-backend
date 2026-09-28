@@ -162,55 +162,16 @@ from services.supabase import (
 # HELPER FUNCTIONS
 # =============================================================================
 
-def format_salary(min_val, max_val):
-    try:
-        if min_val is None and max_val is None:
-            return "N/A"
-        min_val = float(min_val) if min_val else 0
-        max_val = float(max_val) if max_val else 0
-        return f"${int(min_val):,} - ${int(max_val):,}"
-    except:
-        return "N/A"
+from services.serializers import (
+    format_salary,
+    get_company_initial,
+    serialize_row,
+)
 
-
-def get_company_initial(company_name):
-    if not company_name:
-        return "J"
-    return company_name.strip()[0].upper()
-
-
-def serialize_row(row):
-    result = dict(row)
-    for key, value in result.items():
-        if hasattr(value, 'isoformat'):
-            result[key] = value.isoformat()
-    return result
-
-
-def normalize_phone(phone):
-    """Normalize phone to +<digits> for DB storage."""
-    if not phone:
-        return None
-    digits = re.sub(r'\D', '', str(phone))
-    if not digits:
-        return None
-    return f"+{digits}"
-
-
-def generate_username_from_email(email, db_session):
-    base = email.split("@")[0].lower()
-    base = re.sub(r"[^a-z0-9_]", "_", base)
-    username = base
-    counter = 1
-    while True:
-        exists = db_session.execute(
-            text("SELECT id FROM users WHERE username = :u"),
-            {"u": username}
-        ).first()
-        if not exists:
-            return username
-        counter += 1
-        username = f"{base}_{counter}"
+from services.users import (
+    normalize_phone,
+    generate_username_from_email,
+)
 
 
 # =============================================================================
