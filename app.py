@@ -134,21 +134,16 @@ logger.info("app_initialized", env=settings.ENV)
 # UPLOAD CONFIG
 # =============================================================================
 
-ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'webp'}
-ALLOWED_RESUME_EXTENSIONS = {'pdf'}
+from utils.files import (
+    allowed_file,
+    allowed_resume_file,
+    ALLOWED_EXTENSIONS,
+    ALLOWED_RESUME_EXTENSIONS,
+)
+
 MAX_FILE_SIZE = 5 * 1024 * 1024  # 5 MB
 
 app.config['MAX_CONTENT_LENGTH'] = MAX_FILE_SIZE
-
-
-def allowed_file(filename):
-    return '.' in filename and \
-           filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
-
-
-def allowed_resume_file(filename):
-    return '.' in filename and \
-           filename.rsplit('.', 1)[1].lower() in ALLOWED_RESUME_EXTENSIONS
 
 
 # =============================================================================
