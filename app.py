@@ -233,6 +233,16 @@ def serialize_row(row):
     return result
 
 
+def normalize_phone(phone):
+    """Normalize phone to +<digits> for DB storage."""
+    if not phone:
+        return None
+    digits = re.sub(r'\D', '', str(phone))
+    if not digits:
+        return None
+    return f"+{digits}"
+
+
 def generate_username_from_email(email, db_session):
     base = email.split("@")[0].lower()
     base = re.sub(r"[^a-z0-9_]", "_", base)
@@ -860,8 +870,10 @@ def update_profile(user_id):
         # ⭐ Sprint 3: Validation + Sanitize
         # Phone validation
         phone = data.get("phone")
-        if phone and not is_valid_phone(phone):
-            return {"error": {"code": "INVALID_PHONE", "message": "เบอร์โทรไม่ถูกต้อง"}}, 400
+        if phone:
+            if not is_valid_phone(phone):
+                return {"error": {"code": "INVALID_PHONE", "message": "เบอร์โทรไม่ถูกต้อง"}}, 400
+            phone = normalize_phone(phone)
 
         # Sanitize text (XSS protection)
         full_name = sanitize_text(data.get("full_name") or "", max_length=100) or None
@@ -1144,8 +1156,10 @@ def create_application():
         email = email_raw or None
 
         phone = data.get("phone")
-        if phone and not is_valid_phone(phone):
-            return {"error": {"code": "INVALID_PHONE", "message": "เบอร์โทรไม่ถูกต้อง"}}, 400
+        if phone:
+            if not is_valid_phone(phone):
+                return {"error": {"code": "INVALID_PHONE", "message": "เบอร์โทรไม่ถูกต้อง"}}, 400
+            phone = normalize_phone(phone)
 
         location = sanitize_text(
             data.get("location") or "",
