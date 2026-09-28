@@ -16,7 +16,7 @@ from flask_jwt_extended import (
     decode_token,
 )
 
-from config import settings
+from core.config import settings
 
 
 # ============================================================

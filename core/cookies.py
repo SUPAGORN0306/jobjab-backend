@@ -8,7 +8,7 @@ Strategy:
 """
 from flask import Response
 
-from config import settings
+from core.config import settings
 
 
 # ---------- Cookie names ----------

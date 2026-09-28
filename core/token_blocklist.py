@@ -7,7 +7,7 @@ token_blocklist.py — Revoked token storage
 import time
 from datetime import datetime, timezone
 
-from config import settings
+from core.config import settings
 
 
 # ============================================================

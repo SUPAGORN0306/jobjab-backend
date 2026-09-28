@@ -10,7 +10,7 @@ import sys
 
 import structlog
 
-from config import settings
+from core.config import settings
 
 
 def setup_logging() -> None:

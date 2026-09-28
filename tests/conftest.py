@@ -76,7 +76,7 @@ def client(app):
 @pytest.fixture(autouse=True)
 def _disable_limiter(app):
     """ปิด rate limiter ทุก test (autouse)"""
-    from extensions import limiter
+    from core.extensions import limiter
     limiter.enabled = False
     yield
     limiter.enabled = True
@@ -88,7 +88,7 @@ def _fast_bcrypt(monkeypatch):
     ลด BCRYPT_ROUNDS เป็น 4 เพื่อให้ test เร็ว (จาก ~250ms → ~4ms)
     ⚠️ test_security.py::test_bcrypt_default_rounds จะ verify ว่าค่าจริง = 12
     """
-    import security
+    from core import security
     monkeypatch.setattr(security, "BCRYPT_ROUNDS", 4)  # test only - เร็วขึ้น
     yield
 
@@ -96,7 +96,7 @@ def _fast_bcrypt(monkeypatch):
 @pytest.fixture(autouse=True)
 def _reset_blocklist():
     """Reset token blocklist ระหว่าง test (เพราะเป็น module-level singleton)"""
-    import token_blocklist
+    from core import token_blocklist
 
     # เก็บของเก่า
     old_backend = token_blocklist._backend
@@ -117,7 +117,7 @@ def _clean_db(app):
     ใช้ TRUNCATE ... RESTART IDENTITY CASCADE
     ⚠️ ระวัง: ลบทุกอย่างใน public schema ยกเว้นข้อมูลที่ต้อง preserve
     """
-    from extensions import db
+    from core.extensions import db
     from sqlalchemy import text
 
     yield  # ← test รันตรงนี้
@@ -159,7 +159,7 @@ def app_ctx(app):
 @pytest.fixture
 def db_session(app):
     """DB session สำหรับ test ที่ต้อง query เอง"""
-    from extensions import db
+    from core.extensions import db
     with app.app_context():
         yield db.session
         db.session.rollback()
@@ -192,9 +192,9 @@ import uuid as _uuid
 @pytest.fixture
 def make_user(app):
     """สร้าง user ใน DB → return dict {id, email, password, role}"""
-    from extensions import db
+    from core.extensions import db
     from sqlalchemy import text
-    from security import hash_password
+    from core.security import hash_password
 
     def _make(
         email=None,
@@ -277,7 +277,7 @@ def login(app, client):
 @pytest.fixture
 def make_job(app, make_user):
     """สร้าง job ใน DB → return job dict"""
-    from extensions import db
+    from core.extensions import db
     from sqlalchemy import text
 
     def _make(employer=None, **kwargs):
@@ -337,7 +337,7 @@ def make_job(app, make_user):
 @pytest.fixture
 def make_application(app, make_user, make_job):
     """สร้าง application ใน DB"""
-    from extensions import db
+    from core.extensions import db
     from sqlalchemy import text
 
     def _make(user=None, job=None, **kwargs):

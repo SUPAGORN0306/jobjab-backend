@@ -17,11 +17,11 @@ from flask_jwt_extended import get_jwt, jwt_required
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
-from auth_utils import create_tokens_for_user
-from cookies import clear_all_auth_cookies, set_auth_cookies
-from extensions import db, limiter
-from logging_config import get_logger
-from security import (
+from core.auth_utils import create_tokens_for_user
+from core.cookies import clear_all_auth_cookies, set_auth_cookies
+from core.extensions import db, limiter
+from core.logging_config import get_logger
+from core.security import (
     hash_password,
     is_valid_email,
     is_valid_password,
@@ -30,7 +30,7 @@ from security import (
     sanitize_text,
     verify_password,
 )
-from token_blocklist import (
+from core.token_blocklist import (
     is_token_revoked,
     is_user_token_revoked,
     revoke_token,

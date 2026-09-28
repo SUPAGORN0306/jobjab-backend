@@ -16,13 +16,13 @@ import requests as http_requests
 load_dotenv()
 
 # ---------- Sprint 1: Security Extensions ----------
-from config import settings
-from extensions import db, jwt, limiter, csrf, migrate
-from logging_config import setup_logging, get_logger
-from auth import auth_bp
+from core.config import settings
+from core.extensions import db, jwt, limiter, csrf, migrate
+from core.logging_config import setup_logging, get_logger
+from blueprints.auth import auth_bp
 
 # ---------- Sprint 2: Auth decorators ----------
-from security import (
+from core.security import (
     require_auth, require_role, require_owner,
     is_valid_email, is_valid_phone, is_supabase_url, is_safe_filename,
     detect_file_type, validate_file_magic,

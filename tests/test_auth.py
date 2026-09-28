@@ -191,9 +191,9 @@ class TestAuthCoverage:
 
     def test_user_without_roles_gets_default(self, client, app):
         """User ไม่มี role ใน user_roles → login ต้องได้ 403"""
-        from extensions import db
+        from core.extensions import db
         from sqlalchemy import text
-        from security import hash_password
+        from core.security import hash_password
 
         with app.app_context():
             result = db.session.execute(
@@ -223,10 +223,10 @@ class TestAuthCoverage:
     def test_login_rehashes_old_bcrypt(self, client, app, monkeypatch):
         """Login user ที่ password hash เก่า (cost 10) → rehash อัตโนมัติ"""
         # ⭐ ต้อง override BCRYPT_ROUNDS=12 (เพราะ conftest ตั้งไว้ 4)
-        import security as sec_mod
+        import core.security as sec_mod
         monkeypatch.setattr(sec_mod, "BCRYPT_ROUNDS", 12)
 
-        from extensions import db
+        from core.extensions import db
         from sqlalchemy import text
         import bcrypt
 
@@ -278,8 +278,8 @@ class TestAuthCoverage:
 
     def test_refresh_without_user(self, client, app):
         """Refresh ด้วย token ที่ user ถูกลบ → 404"""
-        from auth_utils import create_tokens_for_user
-        from extensions import db
+        from core.auth_utils import create_tokens_for_user
+        from core.extensions import db
         from sqlalchemy import text
 
         with app.app_context():
@@ -319,8 +319,8 @@ class TestAuthEdgeCases:
 
     def test_refresh_revoked_token(self, client, app, make_user):
         """Refresh ด้วย token ที่ revoke → 401"""
-        from auth_utils import create_tokens_for_user
-        from token_blocklist import revoke_token
+        from core.auth_utils import create_tokens_for_user
+        from core.token_blocklist import revoke_token
         from flask_jwt_extended import decode_token
 
         user = make_user(email="ref-rev@test.local", password="TestPass123")
@@ -335,7 +335,7 @@ class TestAuthEdgeCases:
 
     def test_refresh_user_not_found(self, client, app):
         """Refresh → user ไม่มี → 401/404"""
-        from auth_utils import create_tokens_for_user
+        from core.auth_utils import create_tokens_for_user
 
         tokens = create_tokens_for_user(user_id=99999, role="candidate")
         client.set_cookie("refresh_token", tokens["refresh_token"])
@@ -349,8 +349,8 @@ class TestAuthEdgeCases:
 
     def test_logout_with_revoked_refresh(self, client, app, make_user):
         """Logout ด้วย refresh ที่ revoke → ยัง clear cookies"""
-        from auth_utils import create_tokens_for_user
-        from token_blocklist import revoke_token
+        from core.auth_utils import create_tokens_for_user
+        from core.token_blocklist import revoke_token
         from flask_jwt_extended import decode_token
 
         user = make_user(email="logout-rev@test.local", password="TestPass123")
@@ -383,9 +383,9 @@ class TestLogoutRefreshEdge:
     def test_logout_with_expired_token(self, client, app, make_user):
         """Logout ด้วย token expired → 401"""
         import jwt
-        from auth_utils import create_tokens_for_user
+        from core.auth_utils import create_tokens_for_user
         from flask_jwt_extended import decode_token
-        from config import settings
+        from core.config import settings
 
         user = make_user(email="logout-exp@test.local", password="TestPass123")
         tokens = create_tokens_for_user(user["id"], "candidate")
@@ -400,10 +400,10 @@ class TestLogoutRefreshEdge:
 
     def test_refresh_user_without_roles(self, client, app):
         """Refresh — user ไม่มี role → 403 NO_ROLE"""
-        from auth_utils import create_tokens_for_user
-        from extensions import db
+        from core.auth_utils import create_tokens_for_user
+        from core.extensions import db
         from sqlalchemy import text
-        from security import hash_password
+        from core.security import hash_password
 
         with app.app_context():
             result = db.session.execute(
@@ -431,10 +431,10 @@ class TestLogoutRefreshEdge:
 
     def test_me_user_without_roles(self, client, app):
         """Me — user ไม่มี role ใน user_roles"""
-        from auth_utils import create_tokens_for_user
-        from extensions import db
+        from core.auth_utils import create_tokens_for_user
+        from core.extensions import db
         from sqlalchemy import text
-        from security import hash_password
+        from core.security import hash_password
 
         with app.app_context():
             result = db.session.execute(

@@ -4,7 +4,7 @@ Layer 1: ไม่ใช้ DB
 """
 import pytest
 
-from security import (
+from core.security import (
     BCRYPT_ROUNDS,
     hash_password,
     verify_password,
@@ -33,7 +33,7 @@ class TestPasswordHashing:
         # หมายเหตุ: conftest monkeypatch BCRYPT_ROUNDS=4
         # → ต้อง reload module เพื่อดูค่าจริง
         import importlib
-        import security as sec_mod
+        import core.security as sec_mod
         importlib.reload(sec_mod)
         assert sec_mod.BCRYPT_ROUNDS == 12
         # reload กลับ (ให้ monkeypatch ทำงานต่อ)
@@ -99,7 +99,7 @@ class TestPasswordHashing:
 
     def test_needs_rehash_returns_true_for_cost_10(self, monkeypatch):
         """hash cost 10 (เก่า) → ต้อง rehash"""
-        import security as sec_mod
+        import core.security as sec_mod
         # override monkeypatch: ใช้ 12 จริงเพื่อทดสอบ rehash
         monkeypatch.setattr(sec_mod, "BCRYPT_ROUNDS", 12)
 
@@ -115,7 +115,7 @@ class TestPasswordHashing:
 
     def test_rehash_if_needed_returns_new_hash_for_old(self, monkeypatch):
         """hash เก่า → rehash คืน hash ใหม่"""
-        import security as sec_mod
+        import core.security as sec_mod
         monkeypatch.setattr(sec_mod, "BCRYPT_ROUNDS", 12)
 
         import bcrypt
