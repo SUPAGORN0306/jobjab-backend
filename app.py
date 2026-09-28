@@ -1631,14 +1631,15 @@ def get_employer_analytics():
         ).mappings().first()
         active_jobs = active_row["active_jobs"] or 0
 
-        # Response rate — % ของ applications ที่ status != applied
+        # Response rate — % ของ applications ที่ employer ตอบกลับเชิงบวก
+        # (reviewing + interview) — ไม่นับ rejected
         responded_row = db.session.execute(
             text("""
                 SELECT COUNT(a.id) AS responded
                 FROM job_market_data j
                 INNER JOIN applications a ON j.id = a.job_id
                 WHERE j.posted_by_user_id = :uid
-                  AND a.status != 'applied'
+                  AND a.status IN ('reviewing', 'interview')
             """),
             {"uid": user_id}
         ).mappings().first()
