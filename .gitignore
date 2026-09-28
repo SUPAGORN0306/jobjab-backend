@@ -62,3 +62,5 @@ htmlcov/
 *.bak
 *.backup
 *.py.bak
+*.bak_*
+backups/
