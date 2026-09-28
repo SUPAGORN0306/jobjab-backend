@@ -1,0 +1,4 @@
+ตอนรันคือ ต้องเข้า venv environment ก่อน คำสั่งคือ source venv/bin/activate
+แล้วรัน เพื่อเข้า ใช้คำสั่ง python app.py ไม่ก็คำสั่ง flask run ก็จะแสดงหน้าเว็บออกมา
+
+psql -h localhost -U postgres -d job_market

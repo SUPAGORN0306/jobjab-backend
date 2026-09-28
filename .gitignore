@@ -64,3 +64,10 @@ htmlcov/
 *.py.bak
 *.bak_*
 backups/
+
+# ---------- JobJab additions ----------
+job_data.csv
+scripts/data/*.csv
+test_api.py
+test_api.http
+backup*.sql
