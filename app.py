@@ -26,6 +26,7 @@ from blueprints import (
     employer_analytics_bp,
     employer_profile_bp,
     uploads_bp,
+    match_bp,
 )
 
 # ---------- Sprint 2: Auth decorators ----------
@@ -144,6 +145,7 @@ app.register_blueprint(employer_applications_bp)
 app.register_blueprint(employer_analytics_bp)
 app.register_blueprint(employer_profile_bp)
 app.register_blueprint(uploads_bp)
+app.register_blueprint(match_bp)
 
 logger.info("app_initialized", env=settings.ENV)
 
@@ -373,39 +375,6 @@ def jobs_page():
 def tables_page():
     return render_template("table_selector.html")
 
-
-# =============================================================================
-# MATCH SCORE (single job)
-# =============================================================================
-
-@app.route("/api/match-score/<int:job_id>", methods=["GET"])
-def get_match_score(job_id):
-    try:
-        user_id = request.args.get("user_id", type=int)
-        if not user_id:
-            return {"error": "user_id is required"}, 400
-
-        job = db.session.execute(
-            text("""
-                SELECT id, skills_required, experience_level, industry
-                FROM job_market_data WHERE id = :jid
-            """),
-            {"jid": job_id}
-        ).mappings().first()
-
-        if not job:
-            return {"error": "Job not found"}, 404
-
-        user_data = load_user_data(user_id, db.session)
-        match = calculate_match_score_v2(dict(job), user_data)
-        return match, 200
-    except Exception as e:
-        return {"error": str(e)}, 500
-
-
-# ═══════════════════════════════════════════════════════════
-# EMPLOYER ANALYTICS EXPORT (full data)
-# ═══════════════════════════════════════════════════════════
 
 # =============================================================================
 # ERROR HANDLERS
