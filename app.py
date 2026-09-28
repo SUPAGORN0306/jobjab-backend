@@ -1,17 +1,10 @@
-from flask import Flask, render_template, jsonify, request, Response, g
+from flask import Flask, request
 from flask_cors import CORS
-from datetime import datetime
-from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from dotenv import load_dotenv
 import os
-import bcrypt
-import re
-import uuid
-from werkzeug.utils import secure_filename
 from werkzeug.exceptions import RequestEntityTooLarge, HTTPException
 
-import requests as http_requests
 
 load_dotenv()
 
@@ -27,14 +20,6 @@ from blueprints import (
     employer_profile_bp,
     uploads_bp,
     match_bp,
-)
-
-# ---------- Sprint 2: Auth decorators ----------
-from core.security import (
-    require_auth, require_role, require_owner,
-    is_valid_email, is_valid_phone, is_supabase_url, is_safe_filename,
-    detect_file_type, validate_file_magic,
-    sanitize_text,
 )
 
 # ---------- Logging (init first) ----------
@@ -153,150 +138,9 @@ logger.info("app_initialized", env=settings.ENV)
 # UPLOAD CONFIG
 # =============================================================================
 
-from utils.files import (
-    allowed_file,
-    allowed_resume_file,
-    ALLOWED_EXTENSIONS,
-    ALLOWED_RESUME_EXTENSIONS,
-)
-
 MAX_FILE_SIZE = 5 * 1024 * 1024  # 5 MB
 
 app.config['MAX_CONTENT_LENGTH'] = MAX_FILE_SIZE
-
-
-# =============================================================================
-# SUPABASE STORAGE HELPERS (REST API)
-# =============================================================================
-
-from services.supabase import (
-    sb_upload,
-    sb_delete,
-    sb_public_url,
-    extract_supabase_path,
-)
-
-
-# =============================================================================
-# HELPER FUNCTIONS
-# =============================================================================
-
-from services.serializers import (
-    format_salary,
-    get_company_initial,
-    serialize_row,
-)
-
-from services.users import (
-    normalize_phone,
-    generate_username_from_email,
-)
-
-
-# =============================================================================
-# MATCH SCORE
-# =============================================================================
-
-from services.match_score import (
-    load_user_data,
-    calculate_match_score_v2,
-    # calculate_match_score_fast,  # ไม่ได้ใช้ใน routes — uncomment ถ้าต้องการ
-)
-
-
-# =============================================================================
-# =============================================================================
-# HOME / DEBUG
-# =============================================================================
-
-@app.route("/")
-def home():
-    return {"message": "Flask is running"}
-
-
-@app.route("/api/check-columns")
-def check_columns():
-    try:
-        sql = text("""
-            SELECT table_name, column_name, data_type 
-            FROM information_schema.columns 
-            WHERE table_schema = 'public' 
-            ORDER BY table_name, ordinal_position;
-        """)
-        result = db.session.execute(sql)
-
-        tables_data = {}
-        for row in result:
-            t_name = row.table_name
-            c_info = {"column_name": row.column_name, "data_type": row.data_type}
-            if t_name not in tables_data:
-                tables_data[t_name] = []
-            tables_data[t_name].append(c_info)
-
-        return {"database_structure": tables_data}, 200
-    except Exception as e:
-        return {"error": str(e)}, 500
-
-
-@app.route("/debug/routes")
-def debug_routes():
-    routes = []
-    for rule in app.url_map.iter_rules():
-        routes.append({
-            "endpoint": rule.endpoint,
-            "methods": sorted(list(rule.methods - {"HEAD", "OPTIONS"})),
-            "path": str(rule)
-        })
-    return {"total": len(routes), "routes": sorted(routes, key=lambda x: x["path"])}
-
-
-# =============================================================================
-# OTHERS
-# =============================================================================
-
-@app.route("/api/all-tables-data")
-def all_tables_data():
-    try:
-        tables_result = db.session.execute(text("""
-            SELECT table_name 
-            FROM information_schema.tables 
-            WHERE table_schema = 'public'
-            ORDER BY table_name
-        """))
-        tables = [row[0] for row in tables_result]
-
-        result = {}
-        for table_name in tables:
-            try:
-                data_result = db.session.execute(
-                    text(f"SELECT * FROM {table_name} ORDER BY 1")
-                )
-                rows = data_result.mappings().all()
-
-                result[table_name] = {
-                    "columns": list(rows[0].keys()) if rows else [],
-                    "data": [serialize_row(row) for row in rows]
-                }
-            except Exception as e:
-                result[table_name] = {
-                    "columns": [],
-                    "data": [],
-                    "error": str(e)
-                }
-
-        return result
-    except Exception as e:
-        return {"error": str(e)}, 500
-
-
-@app.route("/jobs-page")
-def jobs_page():
-    return render_template("jobs.html")
-
-
-@app.route("/tables")
-def tables_page():
-    return render_template("table_selector.html")
 
 
 # =============================================================================
