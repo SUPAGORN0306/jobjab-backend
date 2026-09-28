@@ -3,5 +3,14 @@ from .auth import auth_bp
 from .jobs import bp as jobs_bp
 from .profile import bp as profile_bp
 from .skills import bp as skills_bp
+from .applications import bp as applications_bp
+from .favorites import bp as favorites_bp
 
-__all__ = ["auth_bp", "jobs_bp", "profile_bp", "skills_bp"]
+__all__ = [
+    "auth_bp",
+    "jobs_bp",
+    "profile_bp",
+    "skills_bp",
+    "applications_bp",
+    "favorites_bp",
+]
