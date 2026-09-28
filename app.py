@@ -3009,6 +3009,165 @@ def export_employer_analytics():
 
 
 # =============================================================================
+# EMPLOYER ANALYTICS — WIDGETS (Top Matches / Funnel / Activity)
+# =============================================================================
+
+@app.route("/api/employer/analytics/widgets", methods=["GET"])
+@require_auth
+@require_role("employer")
+def get_analytics_widgets():
+    """Dashboard widgets: top_matches, funnel, recent_activity"""
+    try:
+        user_id = g.user_id
+
+        period_raw = request.args.get("period", "30")
+        period = period_raw if period_raw in ("7", "30", "90") else "30"
+        days = int(period)
+
+        # ── 1. Hiring Funnel ──
+        funnel_row = db.session.execute(
+            text("""
+                SELECT
+                    COUNT(a.id) AS total,
+                    COUNT(CASE WHEN LOWER(a.status) IN ('reviewing','interview') THEN 1 END) AS reviewing,
+                    COUNT(CASE WHEN LOWER(a.status) = 'interview' THEN 1 END) AS interview,
+                    COUNT(CASE WHEN LOWER(a.status) = 'rejected' THEN 1 END) AS rejected
+                FROM job_market_data j
+                INNER JOIN applications a ON j.id = a.job_id
+                WHERE j.posted_by_user_id = :uid
+                  AND a.applied_date >= NOW() - (:days || ' days')::interval
+            """),
+            {"uid": user_id, "days": days}
+        ).mappings().first()
+
+        funnel = [
+            {"stage": "Applied",   "count": funnel_row["total"] or 0,     "color": "#38bdf8"},
+            {"stage": "Reviewing", "count": funnel_row["reviewing"] or 0, "color": "#f472b6"},
+            {"stage": "Interview", "count": funnel_row["interview"] or 0, "color": "#34d399"},
+            {"stage": "Rejected",  "count": funnel_row["rejected"] or 0,  "color": "#94a3b8"},
+        ]
+
+        # ── 2. Top Matches ──
+        top_apps = db.session.execute(
+            text("""
+                SELECT
+                    a.id, a.user_id, a.full_name, a.status, a.applied_date,
+                    j.job_title, j.skills_required, j.experience_level,
+                    j.industry, j.location AS job_location
+                FROM applications a
+                INNER JOIN job_market_data j ON j.id = a.job_id
+                WHERE j.posted_by_user_id = :uid
+                  AND a.applied_date >= NOW() - (:days || ' days')::interval
+                ORDER BY a.applied_date DESC
+                LIMIT 50
+            """),
+            {"uid": user_id, "days": days}
+        ).mappings().all()
+
+        applicant_ids = [r["id"] for r in top_apps]
+        user_map = {}
+        if applicant_ids:
+            uid_rows = db.session.execute(
+                text("SELECT id AS app_id, user_id FROM applications WHERE id = ANY(:ids)"),
+                {"ids": applicant_ids}
+            ).mappings().all()
+            user_map = {r["app_id"]: r["user_id"] for r in uid_rows}
+
+        user_ids = list(set(user_map.values()))
+        skills_map = {}
+        if user_ids:
+            skill_rows = db.session.execute(
+                text("SELECT user_id, skill_name FROM user_skills WHERE user_id = ANY(:uids)"),
+                {"uids": user_ids}
+            ).mappings().all()
+            for r in skill_rows:
+                skills_map.setdefault(r["user_id"], []).append(r["skill_name"])
+
+        years_map = {}
+        if user_ids:
+            years_rows = db.session.execute(
+                text("""
+                    SELECT user_id, COALESCE(SUM(
+                        EXTRACT(EPOCH FROM (COALESCE(end_date, NOW()) - start_date)) / (365.25 * 24 * 3600)
+                    ), 0) AS total_years
+                    FROM user_experience
+                    WHERE user_id = ANY(:uids)
+                    GROUP BY user_id
+                """),
+                {"uids": user_ids}
+            ).mappings().all()
+            years_map = {r["user_id"]: float(r["total_years"] or 0) for r in years_rows}
+
+        scored = []
+        for row in top_apps:
+            try:
+                uid = user_map.get(row["id"])
+                cand_data = {
+                    "skills": skills_map.get(uid, []),
+                    "total_years": years_map.get(uid, 0),
+                    "industry": "",
+                    "location": "",
+                }
+                job_dict = {
+                    "skills_required": row["skills_required"],
+                    "experience_level": row["experience_level"],
+                    "industry": row["industry"],
+                    "location": row["job_location"],
+                }
+                match = calculate_match_score_v2(job_dict, cand_data)
+                scored.append({
+                    "id": row["id"],
+                    "full_name": row["full_name"],
+                    "job_title": row["job_title"],
+                    "status": row["status"],
+                    "match_score": match["overall"],
+                })
+            except Exception as e:
+                logger.warning("widget_match_failed", app_id=row["id"], error=str(e))
+
+        top_matches = sorted(scored, key=lambda x: x["match_score"], reverse=True)[:5]
+
+        # ── 3. Recent Activity ──
+        activity_rows = db.session.execute(
+            text("""
+                SELECT
+                    a.id, a.full_name, a.status, a.applied_date, a.updated_at,
+                    j.job_title
+                FROM applications a
+                INNER JOIN job_market_data j ON j.id = a.job_id
+                WHERE j.posted_by_user_id = :uid
+                  AND a.applied_date >= NOW() - (:days || ' days')::interval
+                ORDER BY COALESCE(a.updated_at, a.applied_date) DESC
+                LIMIT 6
+            """),
+            {"uid": user_id, "days": days}
+        ).mappings().all()
+
+        recent_activity = [
+            {
+                "id": r["id"],
+                "full_name": r["full_name"],
+                "status": r["status"],
+                "job_title": r["job_title"],
+                "applied_date": r["applied_date"].isoformat() if r["applied_date"] else None,
+                "updated_at": r["updated_at"].isoformat() if r["updated_at"] else None,
+            }
+            for r in activity_rows
+        ]
+
+        return {
+            "period": days,
+            "funnel": funnel,
+            "top_matches": top_matches,
+            "recent_activity": recent_activity,
+        }, 200
+
+    except Exception as e:
+        logger.error("analytics_widgets_failed", error=str(e), exc_info=True)
+        return {"error": {"code": "INTERNAL_ERROR", "message": str(e)}}, 500
+
+
+# =============================================================================
 # ERROR HANDLERS
 # =============================================================================
 
