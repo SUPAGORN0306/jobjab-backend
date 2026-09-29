@@ -10,7 +10,7 @@ Routes:
 from sqlalchemy import text
 from flask import Blueprint, request, jsonify, g
 
-from core.extensions import db
+from core.extensions import db, invalidate_jobs_cache
 from core.security import (
     require_auth,
     is_valid_email, is_valid_phone, is_supabase_url, sanitize_text,
@@ -329,6 +329,7 @@ def create_application():
             )
 
         db.session.commit()
+        invalidate_jobs_cache()
 
         logger.info(
             "application_submitted",

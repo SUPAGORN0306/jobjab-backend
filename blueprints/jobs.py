@@ -132,6 +132,20 @@ def get_jobs():
         return {"error": {"code": "INTERNAL_ERROR", "message": "ไม่สามารถโหลดงานได้"}}, 500
 
 
+@bp.route("/_debug/cache")
+def debug_cache():
+    """Debug endpoint — ดู cache state"""
+    from core.extensions import cache
+    keys = []
+    if hasattr(cache.cache, '_cache'):
+        keys = list(cache.cache._cache.keys())
+    return {
+        "cache_class": cache.cache.__class__.__name__,
+        "keys_count": len(keys),
+        "keys": keys[:20],
+    }
+
+
 @bp.route("/jobs/<int:job_id>")
 def get_job_detail(job_id):
     try:

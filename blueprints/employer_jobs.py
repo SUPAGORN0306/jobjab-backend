@@ -13,7 +13,7 @@ from flask import Blueprint, request, g
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
-from core.extensions import db
+from core.extensions import db, invalidate_jobs_cache
 from core.security import require_auth, require_role, sanitize_text
 from core.logging_config import get_logger
 
@@ -194,6 +194,7 @@ def create_employer_job():
         )
         job_id = result.scalar()
         db.session.commit()
+        invalidate_jobs_cache()
 
         logger.info("job_created", user_id=user_id, job_id=job_id,
                     job_title=job_title, company_name=company_name)
@@ -300,6 +301,7 @@ def update_employer_job(job_id):
             }
         )
         db.session.commit()
+        invalidate_jobs_cache()
 
         logger.info("job_updated", user_id=user_id, job_id=job_id)
 
@@ -347,7 +349,9 @@ def delete_employer_job(job_id):
             text("DELETE FROM job_market_data WHERE id = :jid AND posted_by_user_id = :uid"),
             {"jid": job_id, "uid": user_id}
         )
+
         db.session.commit()
+        invalidate_jobs_cache()
 
         logger.info("job_deleted", user_id=user_id, job_id=job_id, job_title=owner_check[1])
 
@@ -391,7 +395,9 @@ def update_job_status(job_id):
             """),
             {"jid": job_id, "uid": user_id, "status": new_status}
         )
+        
         db.session.commit()
+        invalidate_jobs_cache()
 
         logger.info("job_status_updated", user_id=user_id, job_id=job_id, new_status=new_status)
 

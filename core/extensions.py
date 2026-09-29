@@ -78,3 +78,18 @@ def _revoked_token(jwt_header, jwt_payload):
             "message": "Token ถูกยกเลิก กรุณาเข้าสู่ระบบใหม่",
         }
     }), 401
+
+
+def invalidate_jobs_cache():
+    """
+    ล้าง jobs cache ทั้งหมด
+    
+    เรียกหลัง create/update/delete/apply
+    เพราะ SimpleCache ไม่รองรับ delete_pattern
+    → ต้อง clear() ทั้งหมด
+    """
+    try:
+        cache.clear()
+    except Exception:
+        # Silent fail — ไม่ให้ error จากการ invalidate พัง request
+        pass

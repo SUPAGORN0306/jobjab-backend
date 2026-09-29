@@ -9,7 +9,7 @@ Routes:
 from sqlalchemy import text
 from flask import Blueprint, request, g
 
-from core.extensions import db
+from core.extensions import db, invalidate_jobs_cache
 from core.security import require_auth, is_valid_phone, sanitize_text
 from core.logging_config import get_logger
 from services.serializers import serialize_row
@@ -243,6 +243,7 @@ def update_profile(user_id):
                 )
 
         db.session.commit()
+        invalidate_jobs_cache()
 
         logger.info("profile_updated", user_id=user_id)
 
