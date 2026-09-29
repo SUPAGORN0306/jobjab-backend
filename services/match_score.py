@@ -37,7 +37,7 @@ INDUSTRY_RELATED = {
 def load_user_data(user_id, db_session):
     try:
         user = db_session.execute(
-            text("SELECT industry FROM users WHERE id = :uid"),
+            text("SELECT industry, location FROM users WHERE id = :uid"),
             {"uid": user_id}
         ).mappings().first()
 
@@ -47,27 +47,29 @@ def load_user_data(user_id, db_session):
         ).fetchall()
 
         exp_result = db_session.execute(
-            text("""
-                SELECT 
-                    COALESCE(SUM(
-                        EXTRACT(EPOCH FROM (
-                            COALESCE(end_date, NOW()) - start_date
-                        )) / (365.25 * 24 * 3600)
-                    ), 0) AS total_years
-                FROM user_experience 
-                WHERE user_id = :uid
-            """),
+            text("SELECT start_date, end_date FROM user_experience WHERE user_id = :uid"),
             {"uid": user_id}
-        ).mappings().first()
+        ).mappings().all()
+
+        from datetime import datetime
+        now = datetime.now()
+        total_years = 0.0
+        for exp in exp_result:
+            start = exp.get("start_date")
+            end = exp.get("end_date") or now
+            if start:
+                days = (end - start).days
+                total_years += days / 365.25
 
         return {
-            "industry": (user["industry"] or "").lower().strip() if user else "",
-            "skills": [s[0].lower().strip() for s in skills_result],
-            "total_years": float(exp_result["total_years"] or 0) if exp_result else 0,
+            "industry": user["industry"] if user else "",
+            "location": user["location"] if user else "",
+            "skills": [s[0] for s in skills_result],
+            "total_years": total_years,
         }
     except Exception as e:
         logger.error("load_user_data_failed", error=str(e), exc_info=True)
-        return {"industry": "", "skills": [], "total_years": 0}
+        return {"industry": "", "location": "", "skills": [], "total_years": 0}
 
 
 def calculate_match_score_fast(job_row, user_data):
@@ -323,3 +325,143 @@ def calculate_match_score_v2(job_row, user_data):
             "total_years": 0,
             "weights": {"skills": 0.5, "experience": 0.3, "industry": 0.2},
         }
+
+
+
+
+# =============================================================================
+# PERFORMANCE OPTIMIZATION — Prepared user data (Session 3)
+# =============================================================================
+
+def _build_hierarchy_cache(user_skills_normalized):
+    """Expand user skills + children ครั้งเดียว → O(1) lookup"""
+    expanded = set(user_skills_normalized)
+    for us in user_skills_normalized:
+        expanded |= SKILL_HIERARCHY.get(us, set())
+    return expanded
+
+
+def prepare_user_data(user_data):
+    """Pre-normalize user data ครั้งเดียวก่อน loop หลาย job"""
+    skills_normalized = _normalize_skills(user_data.get("skills", []))
+    return {
+        "industry": (user_data.get("industry") or "").lower().strip(),
+        "location": (user_data.get("location") or "").lower().strip(),
+        "total_years": user_data.get("total_years", 0),
+        "skills_normalized": skills_normalized,
+        "hierarchy_cache": _build_hierarchy_cache(skills_normalized),
+    }
+
+
+def calculate_match_score_v2_prepared(job_row, user_data_prepared):
+    """Fast path — user_data ถูก prepare แล้ว"""
+    try:
+        job_skills = _normalize_skills(job_row.get("skills_required") or "")
+        user_skills = user_data_prepared["skills_normalized"]
+        hierarchy = user_data_prepared["hierarchy_cache"]
+
+        matched_skills = []
+        missing_skills = []
+
+        for js in job_skills:
+            if js in user_skills or js in hierarchy:
+                matched_skills.append(js)
+            else:
+                missing_skills.append(js)
+
+        skills_match = (
+            round((len(matched_skills) / len(job_skills)) * 100)
+            if job_skills else 50
+        )
+
+        total_years = user_data_prepared["total_years"]
+        job_level = (job_row.get("experience_level") or "mid").lower()
+        exp_match = _calculate_experience_match_v2(total_years, job_level)
+
+        industry_match = _calculate_industry_match_v2(
+            user_data_prepared["industry"],
+            job_row.get("industry", "")
+        )
+
+        weights = LEVEL_WEIGHTS.get(job_level, LEVEL_WEIGHTS['mid'])
+        w_skills = weights['skills']
+        w_exp = weights['experience']
+        w_ind = weights['industry']
+
+        overall = (
+            skills_match * w_skills +
+            exp_match * w_exp +
+            industry_match * w_ind
+        )
+
+        if job_skills and len(matched_skills) == 0:
+            overall *= 0.6
+
+        user_loc = user_data_prepared["location"]
+        job_loc = (job_row.get("location") or "").lower()
+        if user_loc and job_loc:
+            if user_loc in job_loc or job_loc in user_loc:
+                overall += 3
+            elif 'remote' in job_loc or 'remote' in user_loc:
+                overall += 2
+
+        overall = max(0, min(100, round(overall)))
+
+        return {
+            "overall": overall,
+            "skills_match": skills_match,
+            "experience_match": exp_match,
+            "industry_match": industry_match,
+            "matched_skills": matched_skills,
+            "missing_skills": missing_skills,
+            "total_years": round(total_years, 1),
+            "weights": {"skills": w_skills, "experience": w_exp, "industry": w_ind},
+        }
+    except Exception as e:
+        logger.error("calculate_match_score_v2_prepared_failed", error=str(e), exc_info=True)
+        return {
+            "overall": 0, "skills_match": 0, "experience_match": 0,
+            "industry_match": 0, "matched_skills": [], "missing_skills": [],
+            "total_years": 0,
+            "weights": {"skills": 0.5, "experience": 0.3, "industry": 0.2},
+        }
+
+
+def load_user_data_combined(user_id, db_session):
+    """
+    โหลด user data ด้วย query เดียว (ลด network round-trip)
+    """
+    try:
+        row = db_session.execute(
+            text("""
+                SELECT 
+                    u.industry,
+                    u.location,
+                    COALESCE(
+                        (SELECT json_agg(skill_name) 
+                         FROM user_skills WHERE user_id = :uid),
+                        '[]'::json
+                    ) AS skills,
+                    COALESCE(
+                        (SELECT SUM((COALESCE(end_date, CURRENT_DATE) - start_date))
+                         FROM user_experience WHERE user_id = :uid),
+                        0
+                    ) AS total_days
+                FROM users u
+                WHERE u.id = :uid
+            """),
+            {"uid": user_id}
+        ).mappings().first()
+
+        if not row:
+            return {"industry": "", "location": "", "skills": [], "total_years": 0}
+
+        return {
+            "industry": row["industry"] or "",
+            "location": row["location"] or "",
+            "skills": row["skills"] or [],
+            "total_years": float(row["total_days"] or 0) / 365.25,
+        }
+    except Exception as e:
+        logger.error("load_user_data_combined_failed", error=str(e), exc_info=True)
+        return {"industry": "", "location": "", "skills": [], "total_years": 0}

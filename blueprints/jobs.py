@@ -8,9 +8,12 @@ Routes:
 from sqlalchemy import text
 from flask import Blueprint, request
 
-from core.extensions import db
+from core.extensions import db, cache
 from core.logging_config import get_logger
-from services.match_score import load_user_data, calculate_match_score_v2
+from services.match_score import (
+    load_user_data, load_user_data_combined, prepare_user_data,
+    calculate_match_score_v2, calculate_match_score_v2_prepared
+)
 from services.serializers import format_salary, get_company_initial, serialize_row
 
 bp = Blueprint("jobs", __name__, url_prefix="/api")
@@ -21,6 +24,17 @@ logger = get_logger(__name__)
 def get_jobs():
     try:
         user_id = request.args.get("user_id", type=int)
+        limit = request.args.get("limit", type=int, default=50)
+        offset = request.args.get("offset", type=int, default=0)
+
+        # cap limit กัน abuse
+        limit = max(1, min(limit, 200))
+
+        # Cache key ตาม user + pagination
+        cache_key = f"jobs:u{user_id or 0}:l{limit}:o{offset}"
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return cached
 
         result = db.session.execute(text("""
             SELECT 
@@ -33,10 +47,11 @@ def get_jobs():
             LEFT JOIN applications a ON j.id = a.job_id
             GROUP BY j.id
             ORDER BY j.id
-        """))
+            LIMIT :limit OFFSET :offset
+        """), {"limit": limit, "offset": offset})
         rows = result.mappings().all()
 
-        user_data = load_user_data(user_id, db.session) if user_id else None
+        user_data = prepare_user_data(load_user_data_combined(user_id, db.session)) if user_id else None
 
         jobs_list = []
         for row in rows:
@@ -44,7 +59,7 @@ def get_jobs():
             count = job_dict.get("applicant_count", 0)
 
             if user_id and user_data:
-                match = calculate_match_score_v2(job_dict, user_data)
+                match = calculate_match_score_v2_prepared(job_dict, user_data)
                 match_score = match["overall"]
                 match_breakdown = {
                     "skills": match["skills_match"],
@@ -92,7 +107,25 @@ def get_jobs():
 
             jobs_list.append(mapped_job)
 
-        return {"jobs": jobs_list}
+        # นับ total สำหรับ frontend
+        total = db.session.execute(
+            text("SELECT COUNT(*) FROM job_market_data")
+        ).scalar()
+
+        response = {
+            "jobs": jobs_list,
+            "pagination": {
+                "total": total,
+                "limit": limit,
+                "offset": offset,
+                "has_more": (offset + len(jobs_list)) < total,
+            }
+        }
+
+        # Cache 60 วิ
+        cache.set(cache_key, response, timeout=60)
+
+        return response
 
     except Exception as e:
         logger.error("get_jobs_failed", error=str(e), exc_info=True)
@@ -134,8 +167,9 @@ def get_job_detail(job_id):
         )
 
         if user_id:
-            user_data = load_user_data(user_id, db.session)
-            match = calculate_match_score_v2(job_dict, user_data)
+            # ⚠️ Bug fix: ต้อง load_user_data_combined ก่อน prepare
+            user_data = prepare_user_data(load_user_data_combined(user_id, db.session))
+            match = calculate_match_score_v2_prepared(job_dict, user_data)
             job_dict["match_score"] = match["overall"]
             job_dict["match_breakdown"] = {
                 "skills": match["skills_match"],

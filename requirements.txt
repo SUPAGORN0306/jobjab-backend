@@ -39,3 +39,4 @@ requests==2.34.2
 
 # ---------- Monitoring ----------
 sentry-sdk[flask]==2.10.0
+Flask-Caching==2.5.1

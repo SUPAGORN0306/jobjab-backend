@@ -10,7 +10,7 @@ load_dotenv()
 
 # ---------- Sprint 1: Security Extensions ----------
 from core.config import settings
-from core.extensions import db, jwt, limiter, csrf, migrate
+from core.extensions import db, jwt, limiter, csrf, migrate, cache
 from core.logging_config import setup_logging, get_logger
 from blueprints import (
     auth_bp, jobs_bp, profile_bp, skills_bp,
@@ -75,10 +75,12 @@ app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 _db_url = app.config["SQLALCHEMY_DATABASE_URI"] or ""
 if _db_url.startswith(("postgresql://", "postgres://")):
     app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {
-        "pool_pre_ping": True,
-        "pool_recycle": 300,
-        "pool_size": 5,
-        "max_overflow": 2,
+        "pool_pre_ping": False,
+        "pool_recycle": 60,
+        "pool_size": 10,
+        "max_overflow": 20,
+        "pool_timeout": 30,
+        "pool_use_lifo": True,
         "connect_args": {
             "sslmode": "require",
             "connect_timeout": 10,
@@ -86,6 +88,11 @@ if _db_url.startswith(("postgresql://", "postgres://")):
     }
 
 db.init_app(app)
+cache.init_app(app, config={
+    'CACHE_TYPE': 'SimpleCache',
+    'CACHE_DEFAULT_TIMEOUT': 60,
+})
+
 
 # =============================================================================
 # SPRINT 1: EXTENSIONS + JWT + LOGGING

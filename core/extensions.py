@@ -11,10 +11,12 @@ from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from flask_migrate import Migrate
 from flask_sqlalchemy import SQLAlchemy
+from flask_caching import Cache
 from flask_wtf.csrf import CSRFProtect
 
 # ---------- Database ----------
 db = SQLAlchemy()
+cache = Cache()
 migrate = Migrate()
 
 # ---------- Auth ----------
