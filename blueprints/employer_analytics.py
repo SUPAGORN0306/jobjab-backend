@@ -538,23 +538,27 @@ def get_analytics_widgets():
         ]
         scored = _score_applicants_batch(apps_for_scoring, db.session)
 
-        # 4. Top 5 by match
+        # 4. Map app_id → full record (for lookup)
+        app_map = {r["id"]: r for r in top_apps}
+
+        # 5. Top 5 by match — join scored back with app data
         top_matches = sorted(
             [
                 {
                     "id": s["id"],
-                    "full_name": s["full_name"],
-                    "job_title": next((r["job_title"] for r in top_apps if r["id"] == s["id"]), ""),
-                    "status": next((r["status"] for r in top_apps if r["id"] == s["id"]), ""),
+                    "full_name": app_map[s["id"]]["full_name"] if s["id"] in app_map else "",
+                    "job_title": app_map[s["id"]]["job_title"] if s["id"] in app_map else "",
+                    "status": app_map[s["id"]]["status"] if s["id"] in app_map else "",
                     "match_score": s["match_score"],
                 }
                 for s in scored
+                if s["id"] in app_map
             ],
             key=lambda x: x["match_score"],
             reverse=True,
         )[:5]
 
-        # 5. Recent activity
+        # 6. Recent activity
         activity_rows = db.session.execute(
             text("""
                 SELECT
