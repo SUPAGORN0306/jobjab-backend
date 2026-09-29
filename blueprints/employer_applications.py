@@ -253,3 +253,188 @@ def update_application_status(application_id):
         db.session.rollback()
         logger.error("update_status_failed", error=str(e), exc_info=True)
         return {"error": str(e)}, 500
+
+
+# ============================================================
+# BFF: All Applications (Bulk endpoint)
+# ============================================================
+# ใช้แทน N+1 loop fetchJobApplications ที่ frontend
+# - 1 query JOIN jobs + applications + users
+# - return jobs + applications + stats พร้อมใช้
+# - cache 60s ต่อ employer
+
+ALL_APPS_CACHE_TTL = 60   # 1 min
+
+
+@bp.route("/applications/all", methods=["GET"])
+@require_auth
+@require_role("employer")
+def get_all_employer_applications():
+    """
+    BFF endpoint — return ทุก jobs + applications ของ employer ใน 1 call
+    
+    ใช้แทนการ loop fetchJobApplications ทีละ job ที่ frontend
+    (เดิม: 10 requests × 1-3s = 10-30s → ตอนนี้: 1 request ~500ms)
+    
+    Query params:
+    - limit: default 500, max 1000 (safety guard)
+    - offset: default 0
+    """
+    user_id = g.user_id
+    limit = request.args.get("limit", type=int, default=500)
+    offset = request.args.get("offset", type=int, default=0)
+    limit = max(1, min(limit, 1000))
+
+    # Cache per employer
+    cache_key = f"emp_all_apps:emp{user_id}:l{limit}:o{offset}"
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return cached, 200
+
+    try:
+        # ─────────────────────────────────────────────────
+        # 1. Jobs ของ employer (พร้อม applicant_count)
+        # ─────────────────────────────────────────────────
+        jobs_result = db.session.execute(
+            text("""
+                SELECT 
+                    j.id,
+                    j.job_title,
+                    j.company_name,
+                    j.location,
+                    j.employment_type,
+                    j.experience_level,
+                    j.salary_min,
+                    j.salary_max,
+                    j.posted_date,
+                    COALESCE(j.status, 'active') AS status,
+                    COUNT(a.id) AS applicant_count
+                FROM job_market_data j
+                LEFT JOIN applications a ON j.id = a.job_id
+                WHERE j.posted_by_user_id = :uid
+                GROUP BY j.id
+                ORDER BY j.posted_date DESC
+            """),
+            {"uid": user_id}
+        )
+        jobs_rows = jobs_result.mappings().all()
+
+        jobs = []
+        job_ids = []
+        for row in jobs_rows:
+            status_raw = row.get("status") or "active"
+            jobs.append({
+                "id": row["id"],
+                "job_title": row["job_title"],
+                "company_name": row["company_name"],
+                "location": row["location"],
+                "employment_type": row["employment_type"],
+                "experience_level": row["experience_level"],
+                "salary_min": row["salary_min"],
+                "salary_max": row["salary_max"],
+                "posted_date": row["posted_date"].isoformat() if row["posted_date"] else None,
+                "applicant_count": row["applicant_count"],
+                "status": status_raw.capitalize() if status_raw else "Active",
+                "status_key": status_raw,
+            })
+            job_ids.append(row["id"])
+
+        # ถ้าไม่มี job เลย → return empty (เร็ว)
+        if not job_ids:
+            response = {
+                "jobs": [],
+                "applications": [],
+                "stats": {
+                    "total_jobs": 0,
+                    "active_jobs": 0,
+                    "total_applicants": 0,
+                    "responded_count": 0,
+                    "response_rate": 0,
+                },
+            }
+            cache.set(cache_key, response, timeout=ALL_APPS_CACHE_TTL)
+            return response, 200
+
+        # ─────────────────────────────────────────────────
+        # 2. All applications ของ jobs เหล่านี้ (1 query)
+        # ─────────────────────────────────────────────────
+        # ⭐ ใช้ ANY(:job_ids) แทน IN — ปลอดภัย + ใช้ index
+        apps_result = db.session.execute(
+            text("""
+                SELECT 
+                    a.id, a.user_id, a.job_id, a.status,
+                    a.full_name, a.email, a.phone, a.location,
+                    a.resume_filename, a.resume_url,
+                    a.applied_date, a.updated_at,
+                    j.job_title,
+                    u.resume_url AS user_resume_url
+                FROM applications a
+                INNER JOIN job_market_data j ON j.id = a.job_id
+                LEFT JOIN users u ON a.user_id = u.id
+                WHERE a.job_id = ANY(:job_ids)
+                ORDER BY a.applied_date DESC
+                LIMIT :limit OFFSET :offset
+            """),
+            {"job_ids": job_ids, "limit": limit, "offset": offset}
+        )
+        apps_rows = apps_result.mappings().all()
+
+        applications = []
+        for row in apps_rows:
+            applications.append({
+                "id": row["id"],
+                "user_id": row["user_id"],
+                "job_id": row["job_id"],
+                "job_title": row["job_title"],        # ⭐ frontend ไม่ต้อง map เอง
+                "status": row["status"] or "applied",
+                "full_name": row["full_name"],
+                "email": row["email"],
+                "phone": row["phone"],
+                "location": row["location"],
+                "resume_filename": row["resume_filename"],
+                "resume_url": row["resume_url"],
+                "user_resume_url": row["user_resume_url"],
+                "applied_date": row["applied_date"].isoformat() if row["applied_date"] else None,
+                "updated_at": row["updated_at"].isoformat() if row["updated_at"] else None,
+            })
+
+        # ─────────────────────────────────────────────────
+        # 3. Stats (คำนวณให้เสร็จ — frontend ไม่ต้องนับเอง)
+        # ─────────────────────────────────────────────────
+        total_applicants = sum(j["applicant_count"] for j in jobs)
+        active_jobs = sum(1 for j in jobs if j["status_key"] == "active")
+        responded_count = sum(
+            1 for a in applications 
+            if a["status"] in ("reviewing", "interview")
+        )
+        response_rate = (
+            round((responded_count / len(applications)) * 100)
+            if applications else 0
+        )
+
+        response = {
+            "jobs": jobs,
+            "applications": applications,
+            "stats": {
+                "total_jobs": len(jobs),
+                "active_jobs": active_jobs,
+                "total_applicants": total_applicants,
+                "responded_count": responded_count,
+                "response_rate": response_rate,
+            },
+        }
+
+        cache.set(cache_key, response, timeout=ALL_APPS_CACHE_TTL)
+
+        logger.info(
+            "all_employer_applications_fetched",
+            user_id=user_id,
+            jobs=len(jobs),
+            applications=len(applications),
+        )
+
+        return response, 200
+
+    except Exception as e:
+        logger.error("get_all_employer_applications_failed", error=str(e), exc_info=True)
+        return {"error": str(e)}, 500
