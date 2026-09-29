@@ -4,27 +4,46 @@ blueprints/employer_applications.py — Employer view applicant details
 Routes:
 - GET /api/employer/applications/<int:application_id>/detail
 - PUT /api/employer/applications/<int:application_id>/status
+
+Performance:
+- Cache per application_id (TTL 120s)
+- Uses calculate_match_score_v2_prepared for snapshot scoring
+- Invalidation: cache.clear() on status update
 """
 from datetime import datetime
 
 from flask import Blueprint, request, g
 from sqlalchemy import text
 
-from core.extensions import db
+from core.extensions import db, cache, invalidate_jobs_cache
 from core.security import require_auth, require_role
 from core.logging_config import get_logger
-from services.match_score import calculate_match_score_v2
+from services.match_score import (
+    prepare_user_data,
+    calculate_match_score_v2_prepared,
+)
 from services.serializers import serialize_row
 
 bp = Blueprint("employer_applications", __name__, url_prefix="/api/employer")
 logger = get_logger(__name__)
+
+DETAIL_CACHE_TTL = 120   # 2 min
 
 
 @bp.route("/applications/<int:application_id>/detail", methods=["GET"])
 @require_auth
 @require_role("employer")
 def get_application_snapshot(application_id):
+    user_id = g.user_id
+
+    # Cache per application
+    cache_key = f"app_detail:app{application_id}"
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return cached, 200
+
     try:
+        # 1. Application + job + user info (single query)
         app_result = db.session.execute(
             text("""
                 SELECT 
@@ -36,7 +55,10 @@ def get_application_snapshot(application_id):
                     j.employment_type, j.experience_level,
                     j.location AS job_location,
                     j.salary_min, j.salary_max,
-                    u.resume_url AS user_resume_url
+                    j.posted_by_user_id,
+                    u.resume_url AS user_resume_url,
+                    u.industry AS user_industry,
+                    u.location AS user_location
                 FROM applications a
                 LEFT JOIN job_market_data j ON a.job_id = j.id
                 LEFT JOIN users u ON a.user_id = u.id
@@ -48,15 +70,11 @@ def get_application_snapshot(application_id):
         if not application:
             return {"error": "Application not found"}, 404
 
-        # ตรวจว่า employer เป็นเจ้าของ job ที่ application นี้สมัคร
-        job_owner = db.session.execute(
-            text("SELECT posted_by_user_id FROM job_market_data WHERE id = :jid"),
-            {"jid": application["job_id"]}
-        ).first()
-
-        if not job_owner or job_owner[0] != g.user_id:
+        # 2. Ownership check (use posted_by_user_id already in main query)
+        if application["posted_by_user_id"] != user_id:
             return {"error": {"code": "FORBIDDEN", "message": "ไม่มีสิทธิ์"}}, 403
 
+        # 3. Snapshot: skills / experiences / educations
         skills_result = db.session.execute(
             text("""
                 SELECT skill_name, skill_level 
@@ -89,21 +107,8 @@ def get_application_snapshot(application_id):
         )
         educations = [serialize_row(row) for row in edu_result.mappings().all()]
 
-        # Calculate match score from snapshot
+        # 4. Match score (using prepared path)
         try:
-            job_data = db.session.execute(
-                text("""
-                    SELECT skills_required, experience_level, industry, location
-                    FROM job_market_data WHERE id = :jid
-                """),
-                {"jid": application["job_id"]}
-            ).mappings().first()
-
-            user_data_row = db.session.execute(
-                text("SELECT industry, location FROM users WHERE id = :uid"),
-                {"uid": application["user_id"]}
-            ).mappings().first()
-
             total_years = 0.0
             for exp in experiences:
                 if exp.get("start_date"):
@@ -117,14 +122,35 @@ def get_application_snapshot(application_id):
                     except (ValueError, TypeError):
                         continue
 
-            candidate_data = {
+            cand_data = {
                 "skills": [s["skill_name"] for s in skills],
                 "total_years": total_years,
-                "industry": (user_data_row["industry"] if user_data_row else "") or "",
-                "location": (user_data_row["location"] if user_data_row else "") or "",
+                "industry": application["user_industry"] or "",
+                "location": application["user_location"] or "",
+            }
+            prepared = prepare_user_data(cand_data)
+
+            job_dict = {
+                "skills_required": None,  # need to fetch — see below
+                "experience_level": application["experience_level"],
+                "industry": None,
+                "location": application["job_location"],
             }
 
-            match_result = calculate_match_score_v2(dict(job_data), candidate_data)
+            # Fetch skills_required + industry from job
+            job_extra = db.session.execute(
+                text("""
+                    SELECT skills_required, industry 
+                    FROM job_market_data WHERE id = :jid
+                """),
+                {"jid": application["job_id"]}
+            ).mappings().first()
+
+            if job_extra:
+                job_dict["skills_required"] = job_extra["skills_required"]
+                job_dict["industry"] = job_extra["industry"]
+
+            match_result = calculate_match_score_v2_prepared(job_dict, prepared)
 
             logger.info(
                 "match_score_calculated",
@@ -140,13 +166,23 @@ def get_application_snapshot(application_id):
                 "weights": {"skills": 0.5, "experience": 0.3, "industry": 0.2},
             }
 
-        return {
-            "application": serialize_row(application),
+        # 5. Build response
+        app_serialized = serialize_row(application)
+        # ลบ fields ที่ไม่ควรส่งออก (internal)
+        app_serialized.pop("posted_by_user_id", None)
+        app_serialized.pop("user_industry", None)
+        app_serialized.pop("user_location", None)
+
+        response = {
+            "application": app_serialized,
             "skills": skills,
             "experiences": experiences,
             "educations": educations,
             "match": match_result,
-        }, 200
+        }
+
+        cache.set(cache_key, response, timeout=DETAIL_CACHE_TTL)
+        return response, 200
 
     except Exception as e:
         logger.error("get_application_detail_failed", error=str(e), exc_info=True)
@@ -165,21 +201,23 @@ def update_application_status(application_id):
         if new_status not in allowed:
             return {"error": f"Invalid status. Allowed: {', '.join(allowed)}"}, 400
 
+        # 1. Ownership check (single query with JOIN)
         check = db.session.execute(
-            text("SELECT id, status, job_id FROM applications WHERE id = :aid"),
+            text("""
+                SELECT a.id, a.status, a.job_id, j.posted_by_user_id
+                FROM applications a
+                INNER JOIN job_market_data j ON j.id = a.job_id
+                WHERE a.id = :aid
+            """),
             {"aid": application_id}
         ).first()
         if not check:
             return {"error": "Application not found"}, 404
 
-        job_owner = db.session.execute(
-            text("SELECT posted_by_user_id FROM job_market_data WHERE id = :jid"),
-            {"jid": check[2]}
-        ).first()
-
-        if not job_owner or job_owner[0] != g.user_id:
+        if check[3] != g.user_id:
             return {"error": {"code": "FORBIDDEN", "message": "ไม่มีสิทธิ์"}}, 403
 
+        # 2. Update
         db.session.execute(
             text("""
                 UPDATE applications 
@@ -189,6 +227,13 @@ def update_application_status(application_id):
             {"status": new_status, "aid": application_id}
         )
         db.session.commit()
+
+        # 3. Invalidate related caches
+        #    - detail cache ของ application นี้
+        cache.delete(f"app_detail:app{application_id}")
+        #    - analytics cache ของ employer นี้ (มี status breakdown + funnel)
+        #      ใช้ invalidate_jobs_cache() ล้างทั้งหมด (เรียบง่าย)
+        invalidate_jobs_cache()
 
         logger.info(
             "application_status_updated",

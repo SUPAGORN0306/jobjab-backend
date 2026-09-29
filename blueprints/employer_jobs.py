@@ -7,13 +7,13 @@ Routes:
 - PUT    /api/employer/jobs/<id>
 - DELETE /api/employer/jobs/<id>
 - PATCH  /api/employer/jobs/<id>/status
-- GET    /api/employer/jobs/<id>/applications
+- GET    /api/employer/jobs/<id>/applications (paginated)
 """
 from flask import Blueprint, request, g
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
-from core.extensions import db, invalidate_jobs_cache
+from core.extensions import db, cache, invalidate_jobs_cache
 from core.security import require_auth, require_role, sanitize_text
 from core.logging_config import get_logger
 
@@ -32,14 +32,24 @@ ALLOWED_JOB_TITLES = {
     'Quant Researcher',
 }
 
+# Cache TTL
+JOBS_LIST_TTL = 120        # 2 min
+APPLICANTS_TTL = 60        # 1 min
+
 
 @bp.route("/jobs", methods=["GET"])
 @require_auth
 @require_role("employer")
 def get_employer_jobs():
-    try:
-        user_id = g.user_id
+    user_id = g.user_id
 
+    # Cache per employer
+    cache_key = f"employer_jobs:emp{user_id}"
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return cached, 200
+
+    try:
         result = db.session.execute(
             text("""
                 SELECT 
@@ -84,7 +94,9 @@ def get_employer_jobs():
                 "status_key": status_raw,
             })
 
-        return {"jobs": jobs}, 200
+        response = {"jobs": jobs}
+        cache.set(cache_key, response, timeout=JOBS_LIST_TTL)
+        return response, 200
 
     except Exception as e:
         logger.error("get_employer_jobs_failed", error=str(e), exc_info=True)
@@ -418,7 +430,20 @@ def update_job_status(job_id):
 @require_auth
 @require_role("employer")
 def get_job_applications(job_id):
+    """
+    Get applicants for a job — paginated.
+    
+    Query params:
+    - limit: default 50, max 200
+    - offset: default 0
+    """
+    user_id = g.user_id
+    limit = request.args.get("limit", type=int, default=50)
+    offset = request.args.get("offset", type=int, default=0)
+    limit = max(1, min(limit, 200))
+
     try:
+        # 1. Ownership check
         job_check = db.session.execute(
             text("SELECT id, job_title, posted_by_user_id FROM job_market_data WHERE id = :jid"),
             {"jid": job_id}
@@ -426,9 +451,22 @@ def get_job_applications(job_id):
         if not job_check:
             return {"error": "Job not found"}, 404
 
-        if job_check[2] != g.user_id:
+        if job_check[2] != user_id:
             return {"error": {"code": "FORBIDDEN", "message": "ไม่มีสิทธิ์"}}, 403
 
+        # 2. Total count (for pagination)
+        total = db.session.execute(
+            text("SELECT COUNT(*) FROM applications WHERE job_id = :jid"),
+            {"jid": job_id}
+        ).scalar() or 0
+
+        # 3. Cache check (page-based)
+        cache_key = f"job_applicants:job{job_id}:l{limit}:o{offset}"
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return cached, 200
+
+        # 4. Query paginated
         result = db.session.execute(
             text("""
                 SELECT 
@@ -440,8 +478,9 @@ def get_job_applications(job_id):
                 LEFT JOIN users u ON a.user_id = u.id
                 WHERE a.job_id = :jid
                 ORDER BY a.applied_date DESC
+                LIMIT :limit OFFSET :offset
             """),
-            {"jid": job_id}
+            {"jid": job_id, "limit": limit, "offset": offset}
         )
 
         rows = result.mappings().all()
@@ -462,12 +501,20 @@ def get_job_applications(job_id):
                 "user_resume_url": row["user_resume_url"],
             })
 
-        return {
+        response = {
             "job_id": job_id,
             "job_title": job_check[1],
             "applications": applications,
-            "total": len(applications),
-        }, 200
+            "pagination": {
+                "total": total,
+                "limit": limit,
+                "offset": offset,
+                "has_more": (offset + len(applications)) < total,
+            },
+        }
+
+        cache.set(cache_key, response, timeout=APPLICANTS_TTL)
+        return response, 200
 
     except Exception as e:
         logger.error("get_job_applications_failed", error=str(e), exc_info=True)
