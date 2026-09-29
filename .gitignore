@@ -71,3 +71,8 @@ scripts/data/*.csv
 test_api.py
 test_api.http
 backup*.sql
+
+# Secrets / local test files
+cookies.txt
+*.cookie
+.env.local
