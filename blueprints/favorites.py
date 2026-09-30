@@ -31,7 +31,8 @@ def get_favorites():
                     j.job_title, j.company_name, j.location,
                     j.salary_min, j.salary_max, j.industry,
                     j.experience_level, j.employment_type,
-                    j.skills_required, j.tools_preferred
+                    j.skills_required, j.tools_preferred,
+                    j.posted_date  
                 FROM favorites f
                 LEFT JOIN job_market_data j ON f.job_id = j.id
                 WHERE f.user_id = :user_id
