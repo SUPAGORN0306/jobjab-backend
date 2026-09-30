@@ -109,11 +109,14 @@ def get_jobs():
         # ═══════════════════════════════════════
         # 4. ORDER BY
         # ═══════════════════════════════════════
+        # ⭐ sort=match → ต้องคำนวณใน Python (เพราะ match_score มาจาก Python ไม่ใช่ SQL)
+        is_match_sort = (sort == "match" and user_id)
+
         order_by = {
             "newest": "j.posted_date DESC NULLS LAST",
             "salary_high": "j.salary_max DESC NULLS LAST",
             "salary_low": "j.salary_min ASC NULLS LAST",
-            "match": "j.id",
+            "match": "j.id",  # fallback (ใช้เมื่อ is_match_sort=False)
         }.get(sort, "j.posted_date DESC NULLS LAST")
 
         # ═══════════════════════════════════════
@@ -127,22 +130,37 @@ def get_jobs():
         # ═══════════════════════════════════════
         # 6. FETCH PAGE
         # ═══════════════════════════════════════
-        query_params = {**params, "limit": limit, "offset": offset}
+        if is_match_sort:
+            # ⭐ fetch ทั้งหมด (ไม่ LIMIT) — จะ sort + paginate ใน Python
+            result = db.session.execute(text(f"""
+                SELECT
+                    j.id, j.company_name, j.industry, j.job_title,
+                    j.skills_required, j.experience_level, j.employment_type,
+                    j.location, j.posted_date, j.company_size, j.tools_preferred,
+                    j.salary_min, j.salary_max,
+                    COUNT(a.id) AS applicant_count
+                FROM job_market_data j
+                LEFT JOIN applications a ON j.id = a.job_id
+                WHERE {where_sql}
+                GROUP BY j.id
+            """), params)
+        else:
+            query_params = {**params, "limit": limit, "offset": offset}
+            result = db.session.execute(text(f"""
+                SELECT
+                    j.id, j.company_name, j.industry, j.job_title,
+                    j.skills_required, j.experience_level, j.employment_type,
+                    j.location, j.posted_date, j.company_size, j.tools_preferred,
+                    j.salary_min, j.salary_max,
+                    COUNT(a.id) AS applicant_count
+                FROM job_market_data j
+                LEFT JOIN applications a ON j.id = a.job_id
+                WHERE {where_sql}
+                GROUP BY j.id
+                ORDER BY {order_by}
+                LIMIT :limit OFFSET :offset
+            """), query_params)
 
-        result = db.session.execute(text(f"""
-            SELECT
-                j.id, j.company_name, j.industry, j.job_title,
-                j.skills_required, j.experience_level, j.employment_type,
-                j.location, j.posted_date, j.company_size, j.tools_preferred,
-                j.salary_min, j.salary_max,
-                COUNT(a.id) AS applicant_count
-            FROM job_market_data j
-            LEFT JOIN applications a ON j.id = a.job_id
-            WHERE {where_sql}
-            GROUP BY j.id
-            ORDER BY {order_by}
-            LIMIT :limit OFFSET :offset
-        """), query_params)
         rows = result.mappings().all()
 
         # ═══════════════════════════════════════
@@ -207,6 +225,16 @@ def get_jobs():
             }
 
             jobs_list.append(mapped_job)
+        # ═══════════════════════════════════════
+        # 7.5 SORT BY MATCH + PAGINATE (Python)
+        # ═══════════════════════════════════════
+        if is_match_sort:
+            jobs_list.sort(
+                key=lambda j: j.get("match_score", 0),
+                reverse=True
+            )
+            jobs_list = jobs_list[offset:offset + limit]
+
 
         # ═══════════════════════════════════════
         # 8. GLOBAL STATS
