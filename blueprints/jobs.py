@@ -23,21 +23,110 @@ logger = get_logger(__name__)
 @bp.route("/jobs")
 def get_jobs():
     try:
+        # ═══════════════════════════════════════
+        # 1. PARSE PARAMS
+        # ═══════════════════════════════════════
         user_id = request.args.get("user_id", type=int)
+
+        # Pagination — รองรับทั้ง page/limit และ offset/limit (backward compat)
+        page = max(1, request.args.get("page", type=int, default=1))
         limit = request.args.get("limit", type=int, default=50)
-        offset = request.args.get("offset", type=int, default=0)
+        limit = max(1, min(limit, 100))
 
-        # cap limit กัน abuse
-        limit = max(1, min(limit, 200))
+        # ถ้ามี offset (จาก frontend เดิม) → คำนวณ page
+        if "offset" in request.args:
+            offset = max(0, request.args.get("offset", type=int, default=0))
+            page = (offset // limit) + 1
+        else:
+            offset = (page - 1) * limit
 
-        # Cache key ตาม user + pagination
-        cache_key = f"jobs:u{user_id or 0}:l{limit}:o{offset}"
+        # Filters
+        q = (request.args.get("q") or "").strip()
+        level = (request.args.get("level") or "").strip()
+        type_ = (request.args.get("type") or "").strip()
+        industry = (request.args.get("industry") or "").strip()
+        salary_min = request.args.get("salary_min", type=int)
+        salary_max = request.args.get("salary_max", type=int)
+        sort = (request.args.get("sort") or "newest").strip()
+
+        # ═══════════════════════════════════════
+        # 2. CACHE KEY
+        # ═══════════════════════════════════════
+        cache_key = (
+            f"jobs:u{user_id or 0}"
+            f":q{q}"
+            f":l{level}"
+            f":t{type_}"
+            f":i{industry}"
+            f":s{salary_min or 0}-{salary_max or 0}"
+            f":sort{sort}"
+            f":p{page}:lim{limit}"
+        )
         cached = cache.get(cache_key)
         if cached is not None:
             return cached
 
-        result = db.session.execute(text("""
-            SELECT 
+        # ═══════════════════════════════════════
+        # 3. WHERE CLAUSE
+        # ═══════════════════════════════════════
+        where_parts = []
+        params = {}
+
+        if q:
+            where_parts.append("""(
+                j.job_title ILIKE :q
+                OR j.company_name ILIKE :q
+                OR j.skills_required ILIKE :q
+            )""")
+            params["q"] = f"%{q}%"
+
+        if level and level != "all":
+            where_parts.append("j.experience_level = :level")
+            params["level"] = level
+
+        if type_ and type_ != "all":
+            where_parts.append("j.employment_type = :type")
+            params["type"] = type_
+
+        if industry and industry != "all":
+            where_parts.append("j.industry = :industry")
+            params["industry"] = industry
+
+        if salary_min and salary_min > 0:
+            where_parts.append("j.salary_max >= :salary_min")
+            params["salary_min"] = salary_min
+
+        if salary_max and salary_max > 0 and salary_max < 1000000:
+            where_parts.append("j.salary_min <= :salary_max")
+            params["salary_max"] = salary_max
+
+        where_sql = " AND ".join(where_parts) if where_parts else "1=1"
+
+        # ═══════════════════════════════════════
+        # 4. ORDER BY
+        # ═══════════════════════════════════════
+        order_by = {
+            "newest": "j.posted_date DESC NULLS LAST",
+            "salary_high": "j.salary_max DESC NULLS LAST",
+            "salary_low": "j.salary_min ASC NULLS LAST",
+            "match": "j.id",  # match score คำนวณ Python
+        }.get(sort, "j.posted_date DESC NULLS LAST")
+
+        # ═══════════════════════════════════════
+        # 5. COUNT TOTAL (filtered)
+        # ═══════════════════════════════════════
+        total = db.session.execute(
+            text(f"SELECT COUNT(*) FROM job_market_data j WHERE {where_sql}"),
+            params
+        ).scalar() or 0
+
+        # ═══════════════════════════════════════
+        # 6. FETCH PAGE
+        # ═══════════════════════════════════════
+        query_params = {**params, "limit": limit, "offset": offset}
+
+        result = db.session.execute(text(f"""
+            SELECT
                 j.id, j.company_name, j.industry, j.job_title,
                 j.skills_required, j.experience_level, j.employment_type,
                 j.location, j.posted_date, j.company_size, j.tools_preferred,
@@ -45,13 +134,21 @@ def get_jobs():
                 COUNT(a.id) AS applicant_count
             FROM job_market_data j
             LEFT JOIN applications a ON j.id = a.job_id
+            WHERE {where_sql}
             GROUP BY j.id
-            ORDER BY j.id
+            ORDER BY {order_by}
             LIMIT :limit OFFSET :offset
-        """), {"limit": limit, "offset": offset})
+        """), query_params)
         rows = result.mappings().all()
 
-        user_data = prepare_user_data(load_user_data_combined(user_id, db.session)) if user_id else None
+        # ═══════════════════════════════════════
+        # 7. MATCH SCORE
+        # ═══════════════════════════════════════
+        user_data = None
+        if user_id:
+            user_data = prepare_user_data(
+                load_user_data_combined(user_id, db.session)
+            )
 
         jobs_list = []
         for row in rows:
@@ -107,22 +204,41 @@ def get_jobs():
 
             jobs_list.append(mapped_job)
 
-        # นับ total สำหรับ frontend
-        total = db.session.execute(
+        # ═══════════════════════════════════════
+        # 8. GLOBAL STATS
+        # ═══════════════════════════════════════
+        total_companies = db.session.execute(
+            text("SELECT COUNT(DISTINCT company_name) FROM job_market_data")
+        ).scalar() or 0
+
+        total_applicants = db.session.execute(
+            text("SELECT COUNT(*) FROM applications")
+        ).scalar() or 0
+
+        total_all_jobs = db.session.execute(
             text("SELECT COUNT(*) FROM job_market_data")
-        ).scalar()
+        ).scalar() or 0
+
+        # ═══════════════════════════════════════
+        # 9. RESPONSE
+        # ═══════════════════════════════════════
+        total_pages = (total + limit - 1) // limit if total > 0 else 0
 
         response = {
             "jobs": jobs_list,
             "pagination": {
                 "total": total,
+                "page": page,
                 "limit": limit,
                 "offset": offset,
+                "total_pages": total_pages,
                 "has_more": (offset + len(jobs_list)) < total,
-            }
+                "total_all_jobs": total_all_jobs,
+                "total_companies": total_companies,
+                "total_applicants": total_applicants,
+            },
         }
 
-        # Cache 60 วิ
         cache.set(cache_key, response, timeout=60)
 
         return response
