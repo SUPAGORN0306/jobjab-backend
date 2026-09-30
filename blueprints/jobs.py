@@ -28,12 +28,10 @@ def get_jobs():
         # ═══════════════════════════════════════
         user_id = request.args.get("user_id", type=int)
 
-        # Pagination — รองรับทั้ง page/limit และ offset/limit (backward compat)
         page = max(1, request.args.get("page", type=int, default=1))
         limit = request.args.get("limit", type=int, default=50)
         limit = max(1, min(limit, 100))
 
-        # ถ้ามี offset (จาก frontend เดิม) → คำนวณ page
         if "offset" in request.args:
             offset = max(0, request.args.get("offset", type=int, default=0))
             page = (offset // limit) + 1
@@ -42,6 +40,7 @@ def get_jobs():
 
         # Filters
         q = (request.args.get("q") or "").strip()
+        position = (request.args.get("position") or "").strip()
         level = (request.args.get("level") or "").strip()
         type_ = (request.args.get("type") or "").strip()
         industry = (request.args.get("industry") or "").strip()
@@ -55,6 +54,7 @@ def get_jobs():
         cache_key = (
             f"jobs:u{user_id or 0}"
             f":q{q}"
+            f":pos{position}"
             f":l{level}"
             f":t{type_}"
             f":i{industry}"
@@ -79,6 +79,10 @@ def get_jobs():
                 OR j.skills_required ILIKE :q
             )""")
             params["q"] = f"%{q}%"
+
+        if position and position != "all":
+            where_parts.append("j.job_title = :position")
+            params["position"] = position
 
         if level and level != "all":
             where_parts.append("j.experience_level = :level")
@@ -109,7 +113,7 @@ def get_jobs():
             "newest": "j.posted_date DESC NULLS LAST",
             "salary_high": "j.salary_max DESC NULLS LAST",
             "salary_low": "j.salary_min ASC NULLS LAST",
-            "match": "j.id",  # match score คำนวณ Python
+            "match": "j.id",
         }.get(sort, "j.posted_date DESC NULLS LAST")
 
         # ═══════════════════════════════════════
