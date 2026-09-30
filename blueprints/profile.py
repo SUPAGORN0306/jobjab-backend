@@ -7,6 +7,7 @@ Routes:
 - PUT /api/profile/<int:user_id>
 """
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError 
 from flask import Blueprint, request, g
 
 from core.extensions import db, invalidate_jobs_cache
