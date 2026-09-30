@@ -415,6 +415,8 @@ def me():
 
     user = _user_dict(row)
     user["roles"] = _get_user_roles(g.user_id)
+    
+    user["role"] = g.user_role or (user["roles"][0] if user["roles"] else None)
 
     # ถ้า employer → เพิ่มข้อมูลบริษัท
     if "employer" in user["roles"]:
@@ -432,6 +434,56 @@ def me():
 
     return jsonify({"user": user}), 200
 
+# ============================================================
+# SWITCH ROLE (multi-role user เปลี่ยน active role)
+# ============================================================
+
+@auth_bp.route("/switch-role", methods=["POST"])
+@require_auth
+def switch_role():
+    """สลับ active role ของ user (multi-role)
+
+    Body: { "role": "candidate" | "employer" }
+    """
+    data = request.get_json(silent=True) or {}
+    requested_role = (data.get("role") or "").lower().strip()
+
+    if not requested_role:
+        return _error("MISSING_ROLE", "ต้องระบุ role")
+
+    if requested_role not in VALID_ROLES:
+        return _error("INVALID_ROLE", f"Role ต้องเป็น {VALID_ROLES}")
+
+    roles = _get_user_roles(g.user_id)
+    if requested_role not in roles:
+        logger.warning(
+            "switch_role_denied",
+            user_id=g.user_id,
+            requested_role=requested_role,
+            owned_roles=roles,
+        )
+        return _error("ROLE_NOT_OWNED", "คุณไม่มี role นี้", 403)
+
+    # ออก tokens ใหม่ (role ใหม่จะอยู่ใน access + refresh claim)
+    tokens = create_tokens_for_user(g.user_id, requested_role)
+
+    response = jsonify({
+        "status": "success",
+        "message": "สลับ role สำเร็จ",
+        "role": requested_role,
+        "csrf_token": tokens["csrf_token"],
+        "expires_in": tokens["expires_in"],
+    })
+    set_auth_cookies(
+        response,
+        tokens["access_token"],
+        tokens["refresh_token"],
+        tokens["csrf_token"],
+    )
+
+    logger.info("role_switched", user_id=g.user_id, new_role=requested_role)
+
+    return response, 200
 
 # =============================================================================
 # ADD ROLE (multiple roles per user)
