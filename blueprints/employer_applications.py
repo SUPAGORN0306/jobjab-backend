@@ -4,6 +4,7 @@ blueprints/employer_applications.py — Employer view applicant details
 Routes:
 - GET /api/employer/applications/<int:application_id>/detail
 - PUT /api/employer/applications/<int:application_id>/status
+- GET /api/employer/applications/all (BFF bulk)
 
 Performance:
 - Cache per application_id (TTL 120s)
@@ -28,8 +29,33 @@ bp = Blueprint("employer_applications", __name__, url_prefix="/api/employer")
 logger = get_logger(__name__)
 
 DETAIL_CACHE_TTL = 120   # 2 min
+ALL_APPS_CACHE_TTL = 60  # 1 min
 
 
+# ═══════════════════════════════════════════════════════════════════
+# Helper: parse interview_date จาก client (ISO string → datetime)
+# ═══════════════════════════════════════════════════════════════════
+def _parse_interview_date(raw):
+    """
+    Return (datetime|None, error_str|None)
+    - raw = None / '' → (None, None)
+    - raw = valid ISO  → (datetime, None)
+    - raw = invalid    → (None, 'error message')
+    """
+    if not raw:
+        return None, None
+    if isinstance(raw, datetime):
+        return raw, None
+    try:
+        cleaned = str(raw).replace("Z", "+00:00")
+        return datetime.fromisoformat(cleaned), None
+    except (ValueError, TypeError):
+        return None, "Invalid interview_date format (expected ISO 8601)"
+
+
+# ═══════════════════════════════════════════════════════════════════
+# GET /detail — Application snapshot
+# ═══════════════════════════════════════════════════════════════════
 @bp.route("/applications/<int:application_id>/detail", methods=["GET"])
 @require_auth
 @require_role("employer")
@@ -44,6 +70,7 @@ def get_application_snapshot(application_id):
 
     try:
         # 1. Application + job + user info (single query)
+        # ⭐ เพิ่ม interview_date, status_changed_at, notes
         app_result = db.session.execute(
             text("""
                 SELECT 
@@ -51,6 +78,7 @@ def get_application_snapshot(application_id):
                     a.full_name, a.email, a.phone, a.location,
                     a.resume_filename, a.resume_url, a.cover_letter,
                     a.applied_date, a.updated_at,
+                    a.interview_date, a.status_changed_at, a.notes,
                     j.job_title, j.company_name,
                     j.employment_type, j.experience_level,
                     j.location AS job_location,
@@ -70,7 +98,7 @@ def get_application_snapshot(application_id):
         if not application:
             return {"error": "Application not found"}, 404
 
-        # 2. Ownership check (use posted_by_user_id already in main query)
+        # 2. Ownership check
         if application["posted_by_user_id"] != user_id:
             return {"error": {"code": "FORBIDDEN", "message": "ไม่มีสิทธิ์"}}, 403
 
@@ -107,7 +135,7 @@ def get_application_snapshot(application_id):
         )
         educations = [serialize_row(row) for row in edu_result.mappings().all()]
 
-        # 4. Match score (using prepared path)
+        # 4. Match score
         try:
             total_years = 0.0
             for exp in experiences:
@@ -131,13 +159,12 @@ def get_application_snapshot(application_id):
             prepared = prepare_user_data(cand_data)
 
             job_dict = {
-                "skills_required": None,  # need to fetch — see below
+                "skills_required": None,
                 "experience_level": application["experience_level"],
                 "industry": None,
                 "location": application["job_location"],
             }
 
-            # Fetch skills_required + industry from job
             job_extra = db.session.execute(
                 text("""
                     SELECT skills_required, industry 
@@ -168,7 +195,6 @@ def get_application_snapshot(application_id):
 
         # 5. Build response
         app_serialized = serialize_row(application)
-        # ลบ fields ที่ไม่ควรส่งออก (internal)
         app_serialized.pop("posted_by_user_id", None)
         app_serialized.pop("user_industry", None)
         app_serialized.pop("user_location", None)
@@ -189,22 +215,27 @@ def get_application_snapshot(application_id):
         return {"error": str(e)}, 500
 
 
+# ═══════════════════════════════════════════════════════════════════
+# PUT /status — Update application status
+# ═══════════════════════════════════════════════════════════════════
 @bp.route("/applications/<int:application_id>/status", methods=["PUT"])
 @require_auth
 @require_role("employer")
 def update_application_status(application_id):
     try:
-        data = request.json
+        data = request.json or {}
         new_status = (data.get("status") or "").lower()
+        raw_interview_date = data.get("interview_date")
+        notes = data.get("notes")
 
         allowed = {"applied", "reviewing", "interview", "rejected"}
         if new_status not in allowed:
             return {"error": f"Invalid status. Allowed: {', '.join(allowed)}"}, 400
 
-        # 1. Ownership check (single query with JOIN)
+        # 1. Ownership check — ⭐ ดึง interview_date เดิมด้วย
         check = db.session.execute(
             text("""
-                SELECT a.id, a.status, a.job_id, j.posted_by_user_id
+                SELECT a.id, a.status, a.job_id, a.interview_date, j.posted_by_user_id
                 FROM applications a
                 INNER JOIN job_market_data j ON j.id = a.job_id
                 WHERE a.id = :aid
@@ -213,26 +244,47 @@ def update_application_status(application_id):
         ).first()
         if not check:
             return {"error": "Application not found"}, 404
-
-        if check[3] != g.user_id:
+        if check[4] != g.user_id:
             return {"error": {"code": "FORBIDDEN", "message": "ไม่มีสิทธิ์"}}, 403
 
-        # 2. Update
+        existing_interview_date = check[3]
+
+        # 2. Handle interview_date
+        if new_status == "interview":
+            if raw_interview_date:
+                parsed, err = _parse_interview_date(raw_interview_date)
+                if err:
+                    return {"error": err}, 400
+                interview_date = parsed
+            else:
+                # ⭐ ไม่ส่ง → เก็บค่าเดิม (ถ้ามี)
+                interview_date = existing_interview_date
+        else:
+            # ⭐ status อื่น → clear interview_date
+            interview_date = None
+
+        # 3. Update
         db.session.execute(
             text("""
                 UPDATE applications 
-                SET status = :status, updated_at = NOW()
+                SET status = :status,
+                    status_changed_at = NOW(),
+                    interview_date = :interview_date,
+                    notes = COALESCE(:notes, notes),
+                    updated_at = NOW()
                 WHERE id = :aid
             """),
-            {"status": new_status, "aid": application_id}
+            {
+                "status": new_status,
+                "interview_date": interview_date,
+                "notes": notes,
+                "aid": application_id,
+            }
         )
         db.session.commit()
 
-        # 3. Invalidate related caches
-        #    - detail cache ของ application นี้
+        # 4. Invalidate caches
         cache.delete(f"app_detail:app{application_id}")
-        #    - analytics cache ของ employer นี้ (มี status breakdown + funnel)
-        #      ใช้ invalidate_jobs_cache() ล้างทั้งหมด (เรียบง่าย)
         invalidate_jobs_cache()
 
         logger.info(
@@ -240,6 +292,7 @@ def update_application_status(application_id):
             user_id=g.user_id,
             application_id=application_id,
             new_status=new_status,
+            interview_date=interview_date.isoformat() if interview_date else None,
         )
 
         return {
@@ -247,6 +300,7 @@ def update_application_status(application_id):
             "message": f"Status updated to '{new_status}'",
             "application_id": application_id,
             "new_status": new_status,
+            "interview_date": interview_date.isoformat() if interview_date else None,
         }, 200
 
     except Exception as e:
@@ -255,17 +309,9 @@ def update_application_status(application_id):
         return {"error": str(e)}, 500
 
 
-# ============================================================
-# BFF: All Applications (Bulk endpoint)
-# ============================================================
-# ใช้แทน N+1 loop fetchJobApplications ที่ frontend
-# - 1 query JOIN jobs + applications + users
-# - return jobs + applications + stats พร้อมใช้
-# - cache 60s ต่อ employer
-
-ALL_APPS_CACHE_TTL = 60   # 1 min
-
-
+# ═══════════════════════════════════════════════════════════════════
+# GET /all — BFF: All applications (bulk)
+# ═══════════════════════════════════════════════════════════════════
 @bp.route("/applications/all", methods=["GET"])
 @require_auth
 @require_role("employer")
@@ -273,11 +319,8 @@ def get_all_employer_applications():
     """
     BFF endpoint — return ทุก jobs + applications ของ employer ใน 1 call
     
-    ใช้แทนการ loop fetchJobApplications ทีละ job ที่ frontend
-    (เดิม: 10 requests × 1-3s = 10-30s → ตอนนี้: 1 request ~500ms)
-    
     Query params:
-    - limit: default 500, max 1000 (safety guard)
+    - limit: default 500, max 1000
     - offset: default 0
     """
     user_id = g.user_id
@@ -285,7 +328,6 @@ def get_all_employer_applications():
     offset = request.args.get("offset", type=int, default=0)
     limit = max(1, min(limit, 1000))
 
-    # Cache per employer
     cache_key = f"emp_all_apps:emp{user_id}:l{limit}:o{offset}"
     cached = cache.get(cache_key)
     if cached is not None:
@@ -293,7 +335,7 @@ def get_all_employer_applications():
 
     try:
         # ─────────────────────────────────────────────────
-        # 1. Jobs ของ employer (พร้อม applicant_count)
+        # 1. Jobs ของ employer — ⭐ เพิ่ม expires_at
         # ─────────────────────────────────────────────────
         jobs_result = db.session.execute(
             text("""
@@ -307,6 +349,7 @@ def get_all_employer_applications():
                     j.salary_min,
                     j.salary_max,
                     j.posted_date,
+                    j.expires_at,
                     COALESCE(j.status, 'active') AS status,
                     COUNT(a.id) AS applicant_count
                 FROM job_market_data j
@@ -333,13 +376,14 @@ def get_all_employer_applications():
                 "salary_min": row["salary_min"],
                 "salary_max": row["salary_max"],
                 "posted_date": row["posted_date"].isoformat() if row["posted_date"] else None,
+                "expires_at": row["expires_at"].isoformat() if row["expires_at"] else None,
                 "applicant_count": row["applicant_count"],
                 "status": status_raw.capitalize() if status_raw else "Active",
                 "status_key": status_raw,
             })
             job_ids.append(row["id"])
 
-        # ถ้าไม่มี job เลย → return empty (เร็ว)
+        # ถ้าไม่มี job
         if not job_ids:
             response = {
                 "jobs": [],
@@ -356,9 +400,8 @@ def get_all_employer_applications():
             return response, 200
 
         # ─────────────────────────────────────────────────
-        # 2. All applications ของ jobs เหล่านี้ (1 query)
+        # 2. All applications — ⭐ เพิ่ม interview_date, status_changed_at
         # ─────────────────────────────────────────────────
-        # ⭐ ใช้ ANY(:job_ids) แทน IN — ปลอดภัย + ใช้ index
         apps_result = db.session.execute(
             text("""
                 SELECT 
@@ -366,6 +409,7 @@ def get_all_employer_applications():
                     a.full_name, a.email, a.phone, a.location,
                     a.resume_filename, a.resume_url,
                     a.applied_date, a.updated_at,
+                    a.interview_date, a.status_changed_at,
                     j.job_title,
                     u.resume_url AS user_resume_url
                 FROM applications a
@@ -385,7 +429,7 @@ def get_all_employer_applications():
                 "id": row["id"],
                 "user_id": row["user_id"],
                 "job_id": row["job_id"],
-                "job_title": row["job_title"],        # ⭐ frontend ไม่ต้อง map เอง
+                "job_title": row["job_title"],
                 "status": row["status"] or "applied",
                 "full_name": row["full_name"],
                 "email": row["email"],
@@ -396,10 +440,12 @@ def get_all_employer_applications():
                 "user_resume_url": row["user_resume_url"],
                 "applied_date": row["applied_date"].isoformat() if row["applied_date"] else None,
                 "updated_at": row["updated_at"].isoformat() if row["updated_at"] else None,
+                "interview_date": row["interview_date"].isoformat() if row["interview_date"] else None,
+                "status_changed_at": row["status_changed_at"].isoformat() if row["status_changed_at"] else None,
             })
 
         # ─────────────────────────────────────────────────
-        # 3. Stats (คำนวณให้เสร็จ — frontend ไม่ต้องนับเอง)
+        # 3. Stats
         # ─────────────────────────────────────────────────
         total_applicants = sum(j["applicant_count"] for j in jobs)
         active_jobs = sum(1 for j in jobs if j["status_key"] == "active")

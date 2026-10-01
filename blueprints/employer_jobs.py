@@ -9,6 +9,8 @@ Routes:
 - PATCH  /api/employer/jobs/<id>/status
 - GET    /api/employer/jobs/<id>/applications (paginated)
 """
+from datetime import datetime   # ⭐ NEW: for expires_at parsing
+
 from flask import Blueprint, request, g
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
@@ -37,13 +39,31 @@ JOBS_LIST_TTL = 120        # 2 min
 APPLICANTS_TTL = 60        # 1 min
 
 
+# ═══════════════════════════════════════════════════════════════════
+# Helper: parse expires_at
+# ═══════════════════════════════════════════════════════════════════
+def _parse_expires_at(raw):
+    """Return (datetime|None, error_str|None)"""
+    if not raw:
+        return None, None
+    if isinstance(raw, datetime):
+        return raw, None
+    try:
+        cleaned = str(raw).replace("Z", "+00:00")
+        return datetime.fromisoformat(cleaned), None
+    except (ValueError, TypeError):
+        return None, "Invalid expires_at format (expected ISO 8601)"
+
+
+# ═══════════════════════════════════════════════════════════════════
+# GET /jobs — list employer's jobs
+# ═══════════════════════════════════════════════════════════════════
 @bp.route("/jobs", methods=["GET"])
 @require_auth
 @require_role("employer")
 def get_employer_jobs():
     user_id = g.user_id
 
-    # Cache per employer
     cache_key = f"employer_jobs:emp{user_id}"
     cached = cache.get(cache_key)
     if cached is not None:
@@ -62,6 +82,7 @@ def get_employer_jobs():
                     j.salary_min,
                     j.salary_max,
                     j.posted_date,
+                    j.expires_at,
                     COALESCE(j.status, 'active') AS status,
                     COUNT(a.id) AS applicant_count
                 FROM job_market_data j
@@ -89,6 +110,7 @@ def get_employer_jobs():
                 "salary_min": row["salary_min"],
                 "salary_max": row["salary_max"],
                 "posted_date": row["posted_date"].isoformat() if row["posted_date"] else None,
+                "expires_at": row["expires_at"].isoformat() if row["expires_at"] else None,
                 "applicant_count": row["applicant_count"],
                 "status": status_label,
                 "status_key": status_raw,
@@ -103,6 +125,9 @@ def get_employer_jobs():
         return {"error": str(e)}, 500
 
 
+# ═══════════════════════════════════════════════════════════════════
+# POST /jobs — create a new job
+# ═══════════════════════════════════════════════════════════════════
 @bp.route("/jobs", methods=["POST"])
 @require_auth
 @require_role("employer")
@@ -128,7 +153,7 @@ def create_employer_job():
         company_name = emp_profile["company_name"]
         industry_from_profile = emp_profile["industry"]
 
-        # ⭐ ไม่รับ company_name / industry จาก client
+        # sanitize inputs
         job_title = sanitize_text(data.get("job_title") or "", max_length=100)
         location = sanitize_text(data.get("location") or "", max_length=200)
         skills_required = sanitize_text(data.get("skills_required") or "", max_length=1000)
@@ -179,6 +204,12 @@ def create_employer_job():
                 )
             }, 400
 
+        # ⭐ NEW: parse expires_at (optional)
+        raw_expires = data.get("expires_at")
+        expires_at, err = _parse_expires_at(raw_expires)
+        if err:
+            return {"error": err}, 400
+
         result = db.session.execute(
             text("""
                 INSERT INTO job_market_data (
@@ -188,7 +219,7 @@ def create_employer_job():
                     skills_required, tools_preferred,
                     industry, company_size,
                     about_role, responsibilities, requirements,
-                    posted_by_user_id, posted_date, status
+                    posted_by_user_id, posted_date, expires_at, status
                 ) VALUES (
                     :job_title, :company_name, :location,
                     :employment_type, :experience_level,
@@ -196,13 +227,15 @@ def create_employer_job():
                     :skills_required, :tools_preferred,
                     :industry, :company_size,
                     :about_role, :responsibilities, :requirements,
-                    :user_id, NOW(), 'active'
+                    :user_id, NOW(),
+                    COALESCE(:expires_at, NOW() + INTERVAL '60 days'),
+                    'active'
                 )
                 RETURNING id
             """),
             {
                 "job_title": job_title,
-                "company_name": company_name,           # ⭐ จาก profile
+                "company_name": company_name,
                 "location": location or None,
                 "employment_type": employment_type,
                 "experience_level": experience_level,
@@ -210,12 +243,13 @@ def create_employer_job():
                 "salary_max": int(salary_max) if salary_max else None,
                 "skills_required": skills_required or None,
                 "tools_preferred": tools_preferred or None,
-                "industry": industry_from_profile or None,   # ⭐ จาก profile
+                "industry": industry_from_profile or None,
                 "company_size": company_size or None,
                 "about_role": about_role or None,
                 "responsibilities": responsibilities or None,
                 "requirements": requirements or None,
                 "user_id": user_id,
+                "expires_at": expires_at,
             }
         )
         job_id = result.scalar()
@@ -236,6 +270,9 @@ def create_employer_job():
         return {"error": str(e)}, 500
 
 
+# ═══════════════════════════════════════════════════════════════════
+# PUT /jobs/<id> — edit a job
+# ═══════════════════════════════════════════════════════════════════
 @bp.route("/jobs/<int:job_id>", methods=["PUT"])
 @require_auth
 @require_role("employer")
@@ -254,7 +291,6 @@ def update_employer_job(job_id):
         if owner_check[0] != user_id:
             return {"error": {"code": "FORBIDDEN", "message": "No permission"}}, 403
 
-        # ⭐ ดึง company_name + industry จาก employer_profiles
         emp_profile = db.session.execute(
             text("SELECT company_name, industry FROM employer_profiles WHERE user_id = :uid"),
             {"uid": user_id}
@@ -275,7 +311,6 @@ def update_employer_job(job_id):
         if not data:
             return {"error": {"code": "NO_DATA", "message": "No data provided"}}, 400
 
-        # ⭐ ไม่รับ company_name / industry จาก client
         job_title = sanitize_text(data.get("job_title") or "", max_length=100)
         location = sanitize_text(data.get("location") or "", max_length=200)
         skills_required = sanitize_text(data.get("skills_required") or "", max_length=1000)
@@ -306,6 +341,12 @@ def update_employer_job(job_id):
         if not job_title or job_title not in ALLOWED_JOB_TITLES:
             return {"error": {"code": "INVALID_TITLE", "message": "Invalid job title"}}, 400
 
+        # ⭐ NEW: parse expires_at (optional)
+        raw_expires = data.get("expires_at")
+        expires_at, err = _parse_expires_at(raw_expires)
+        if err:
+            return {"error": err}, 400
+
         db.session.execute(
             text("""
                 UPDATE job_market_data SET
@@ -322,24 +363,26 @@ def update_employer_job(job_id):
                     company_size = :company_size,
                     about_role = :about_role,
                     responsibilities = :responsibilities,
-                    requirements = :requirements
+                    requirements = :requirements,
+                    expires_at = COALESCE(:expires_at, expires_at)
                 WHERE id = :jid AND posted_by_user_id = :uid
             """),
             {
                 "jid": job_id, "uid": user_id,
                 "job_title": job_title,
-                "company_name": company_name,               # ⭐ จาก profile
+                "company_name": company_name,
                 "location": location or None,
                 "employment_type": employment_type,
                 "experience_level": experience_level,
                 "salary_min": salary_min, "salary_max": salary_max,
                 "skills_required": skills_required or None,
                 "tools_preferred": tools_preferred or None,
-                "industry": industry_from_profile or None,  # ⭐ จาก profile
+                "industry": industry_from_profile or None,
                 "company_size": company_size or None,
                 "about_role": about_role or None,
                 "responsibilities": responsibilities or None,
                 "requirements": requirements or None,
+                "expires_at": expires_at,
             }
         )
         db.session.commit()
@@ -355,6 +398,9 @@ def update_employer_job(job_id):
         return {"error": {"code": "INTERNAL_ERROR", "message": "Something went wrong"}}, 500
 
 
+# ═══════════════════════════════════════════════════════════════════
+# DELETE /jobs/<id>
+# ═══════════════════════════════════════════════════════════════════
 @bp.route("/jobs/<int:job_id>", methods=["DELETE"])
 @require_auth
 @require_role("employer")
@@ -405,6 +451,9 @@ def delete_employer_job(job_id):
         return {"error": {"code": "INTERNAL_ERROR", "message": "Something went wrong"}}, 500
 
 
+# ═══════════════════════════════════════════════════════════════════
+# PATCH /jobs/<id>/status — pause / activate
+# ═══════════════════════════════════════════════════════════════════
 @bp.route("/jobs/<int:job_id>/status", methods=["PATCH"])
 @require_auth
 @require_role("employer")
@@ -437,7 +486,7 @@ def update_job_status(job_id):
             """),
             {"jid": job_id, "uid": user_id, "status": new_status}
         )
-        
+
         db.session.commit()
         invalidate_jobs_cache()
 
@@ -456,6 +505,9 @@ def update_job_status(job_id):
         return {"error": {"code": "INTERNAL_ERROR", "message": "Something went wrong"}}, 500
 
 
+# ═══════════════════════════════════════════════════════════════════
+# GET /jobs/<id>/applications — paginated
+# ═══════════════════════════════════════════════════════════════════
 @bp.route("/jobs/<int:job_id>/applications", methods=["GET"])
 @require_auth
 @require_role("employer")
@@ -490,7 +542,7 @@ def get_job_applications(job_id):
             {"jid": job_id}
         ).scalar() or 0
 
-        # 3. Cache check (page-based)
+        # 3. Cache check
         cache_key = f"job_applicants:job{job_id}:l{limit}:o{offset}"
         cached = cache.get(cache_key)
         if cached is not None:
