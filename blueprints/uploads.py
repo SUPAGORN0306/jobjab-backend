@@ -5,7 +5,7 @@ Routes:
 - POST   /api/upload/resume
 - DELETE /api/resume/<int:user_id>
 - POST   /api/upload/avatar
-- POST   /api/upload/company-logo
+- POST   /api/upload/company-logo   ⭐ ไม่ UPDATE DB — return URL เท่านั้น
 """
 import uuid
 
@@ -240,11 +240,19 @@ def upload_avatar():
         return {"error": str(e)}, 500
 
 
+# ⭐ แก้: ไม่ UPDATE DB ที่นี่ — return URL เท่านั้น
+# frontend เอา URL ไป PUT /api/employer/profile ตอน Save
 @bp.route("/upload/company-logo", methods=["POST"])
 @require_auth
 @require_role("employer")
 def upload_company_logo():
-    """อัปโหลด Company Logo → Supabase Storage"""
+    """
+    อัปโหลด Company Logo → Supabase Storage
+
+    ⭐ ไม่ UPDATE DB ที่นี่
+    return URL เท่านั้น → frontend เอาไป PUT /api/employer/profile ตอน Save
+    (การลบไฟล์เก่าเกิดขึ้นใน PUT /profile)
+    """
     try:
         user_id = g.user_id
 
@@ -272,16 +280,7 @@ def upload_company_logo():
         storage_filename = f"logo_user_{user_id}_{uuid.uuid4().hex[:8]}.{ext}"
         content_type = file.content_type or "image/jpeg"
 
-        old = db.session.execute(
-            text("SELECT company_logo FROM employer_profiles WHERE user_id = :uid"),
-            {"uid": user_id}
-        ).first()
-
-        if old and old[0] and "supabase.co" in old[0]:
-            old_path = extract_supabase_path(old[0], "company-logos")
-            if old_path:
-                sb_delete("company-logos", old_path)
-
+        # ⭐ ไม่ลบไฟล์เก่า / ไม่ UPDATE DB ที่นี่
         upload_res = sb_upload("company-logos", storage_filename, file_bytes, content_type)
 
         if upload_res.status_code not in (200, 201):
@@ -290,30 +289,19 @@ def upload_company_logo():
 
         image_url = sb_public_url("company-logos", storage_filename)
 
-        db.session.execute(
-            text("""
-                UPDATE employer_profiles 
-                SET company_logo = :logo, updated_at = NOW()
-                WHERE user_id = :uid
-            """),
-            {"logo": image_url, "uid": user_id}
-        )
-        db.session.commit()
-
         logger.info(
-            "company_logo_uploaded",
+            "company_logo_uploaded_to_storage",
             user_id=user_id,
             filename=storage_filename,
         )
 
         return {
             "status": "success",
-            "message": "Company logo uploaded successfully",
+            "message": "Company logo uploaded to storage",
             "image_url": image_url,
             "filename": storage_filename,
         }, 200
 
     except Exception as e:
-        db.session.rollback()
         logger.error("upload_company_logo_failed", error=str(e), exc_info=True)
         return {"error": str(e)}, 500

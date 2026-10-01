@@ -111,12 +111,28 @@ def create_employer_job():
         data = request.json
         user_id = g.user_id
 
+        # ⭐ ดึง company_name + industry จาก employer_profiles
+        emp_profile = db.session.execute(
+            text("SELECT company_name, industry FROM employer_profiles WHERE user_id = :uid"),
+            {"uid": user_id}
+        ).mappings().first()
+
+        if not emp_profile or not emp_profile.get("company_name"):
+            return {
+                "error": {
+                    "code": "NO_COMPANY_PROFILE",
+                    "message": "Please complete your company profile before posting a job"
+                }
+            }, 400
+
+        company_name = emp_profile["company_name"]
+        industry_from_profile = emp_profile["industry"]
+
+        # ⭐ ไม่รับ company_name / industry จาก client
         job_title = sanitize_text(data.get("job_title") or "", max_length=100)
-        company_name = sanitize_text(data.get("company_name") or "", max_length=200)
         location = sanitize_text(data.get("location") or "", max_length=200)
         skills_required = sanitize_text(data.get("skills_required") or "", max_length=1000)
         tools_preferred = sanitize_text(data.get("tools_preferred") or "", max_length=1000)
-        industry = sanitize_text(data.get("industry") or "", max_length=100)
         company_size = sanitize_text(data.get("company_size") or "", max_length=50)
         about_role = sanitize_text(data.get("about_role") or "", max_length=5000)
         responsibilities = sanitize_text(data.get("responsibilities") or "", max_length=5000)
@@ -162,8 +178,6 @@ def create_employer_job():
                     f"{', '.join(sorted(ALLOWED_JOB_TITLES))}"
                 )
             }, 400
-        if not company_name:
-            return {"error": "Company name is required"}, 400
 
         result = db.session.execute(
             text("""
@@ -188,7 +202,7 @@ def create_employer_job():
             """),
             {
                 "job_title": job_title,
-                "company_name": company_name,
+                "company_name": company_name,           # ⭐ จาก profile
                 "location": location or None,
                 "employment_type": employment_type,
                 "experience_level": experience_level,
@@ -196,7 +210,7 @@ def create_employer_job():
                 "salary_max": int(salary_max) if salary_max else None,
                 "skills_required": skills_required or None,
                 "tools_preferred": tools_preferred or None,
-                "industry": industry or None,
+                "industry": industry_from_profile or None,   # ⭐ จาก profile
                 "company_size": company_size or None,
                 "about_role": about_role or None,
                 "responsibilities": responsibilities or None,
@@ -240,16 +254,32 @@ def update_employer_job(job_id):
         if owner_check[0] != user_id:
             return {"error": {"code": "FORBIDDEN", "message": "No permission"}}, 403
 
+        # ⭐ ดึง company_name + industry จาก employer_profiles
+        emp_profile = db.session.execute(
+            text("SELECT company_name, industry FROM employer_profiles WHERE user_id = :uid"),
+            {"uid": user_id}
+        ).mappings().first()
+
+        if not emp_profile or not emp_profile.get("company_name"):
+            return {
+                "error": {
+                    "code": "NO_COMPANY_PROFILE",
+                    "message": "Please complete your company profile first"
+                }
+            }, 400
+
+        company_name = emp_profile["company_name"]
+        industry_from_profile = emp_profile["industry"]
+
         data = request.json
         if not data:
             return {"error": {"code": "NO_DATA", "message": "No data provided"}}, 400
 
+        # ⭐ ไม่รับ company_name / industry จาก client
         job_title = sanitize_text(data.get("job_title") or "", max_length=100)
-        company_name = sanitize_text(data.get("company_name") or "", max_length=200)
         location = sanitize_text(data.get("location") or "", max_length=200)
         skills_required = sanitize_text(data.get("skills_required") or "", max_length=1000)
         tools_preferred = sanitize_text(data.get("tools_preferred") or "", max_length=1000)
-        industry = sanitize_text(data.get("industry") or "", max_length=100)
         company_size = sanitize_text(data.get("company_size") or "", max_length=50)
         about_role = sanitize_text(data.get("about_role") or "", max_length=5000)
         responsibilities = sanitize_text(data.get("responsibilities") or "", max_length=5000)
@@ -275,8 +305,6 @@ def update_employer_job(job_id):
 
         if not job_title or job_title not in ALLOWED_JOB_TITLES:
             return {"error": {"code": "INVALID_TITLE", "message": "Invalid job title"}}, 400
-        if not company_name:
-            return {"error": {"code": "MISSING_COMPANY", "message": "Company required"}}, 400
 
         db.session.execute(
             text("""
@@ -299,14 +327,16 @@ def update_employer_job(job_id):
             """),
             {
                 "jid": job_id, "uid": user_id,
-                "job_title": job_title, "company_name": company_name,
+                "job_title": job_title,
+                "company_name": company_name,               # ⭐ จาก profile
                 "location": location or None,
                 "employment_type": employment_type,
                 "experience_level": experience_level,
                 "salary_min": salary_min, "salary_max": salary_max,
                 "skills_required": skills_required or None,
                 "tools_preferred": tools_preferred or None,
-                "industry": industry or None, "company_size": company_size or None,
+                "industry": industry_from_profile or None,  # ⭐ จาก profile
+                "company_size": company_size or None,
                 "about_role": about_role or None,
                 "responsibilities": responsibilities or None,
                 "requirements": requirements or None,
