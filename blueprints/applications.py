@@ -202,6 +202,31 @@ def create_application():
         skills = data.get("skills", [])
         experiences = data.get("experiences", [])
         educations = data.get("educations", [])
+        if not experiences:
+            exp_rows = db.session.execute(
+                text("""
+                    SELECT job_title, company_name, location,
+                           start_date, end_date, is_current, description
+                    FROM user_experience
+                    WHERE user_id = :uid
+                    ORDER BY start_date DESC NULLS LAST
+                """),
+                {"uid": user_id}
+            ).mappings().all()
+            experiences = [dict(r) for r in exp_rows]
+
+        if not educations:
+            edu_rows = db.session.execute(
+                text("""
+                    SELECT institution, degree, field_of_study,
+                           start_date, end_date, is_current, gpa
+                    FROM user_education
+                    WHERE user_id = :uid
+                    ORDER BY start_date DESC NULLS LAST
+                """),
+                {"uid": user_id}
+            ).mappings().all()
+            educations = [dict(r) for r in edu_rows]
 
         if not job_id:
             return {"error": "job_id is required"}, 400
