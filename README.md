@@ -186,7 +186,6 @@ Environment variables must be configured in the Render dashboard:
 |--------|--------------------|---------------------------------------------|
 | POST   | /api/auth/register | Create a new user account                   |
 | POST   | /api/auth/login    | Authenticate existing user                  |
-| POST   | /api/auth/add-role | Add a secondary role to an existing account |
 
 ### Jobs
 
