@@ -9,7 +9,7 @@ Routes:
 - PATCH  /api/employer/jobs/<id>/status
 - GET    /api/employer/jobs/<id>/applications (paginated)
 """
-from datetime import datetime   # ⭐ NEW: for expires_at parsing
+from datetime import datetime
 
 from flask import Blueprint, request, g
 from sqlalchemy import text
@@ -22,7 +22,9 @@ from core.logging_config import get_logger
 bp = Blueprint("employer_jobs", __name__, url_prefix="/api/employer")
 logger = get_logger(__name__)
 
-# Job title whitelist
+# ============================================================
+# CONSTANTS — Whitelists
+# ============================================================
 ALLOWED_JOB_TITLES = {
     'AI Product Manager',
     'AI Researcher',
@@ -33,6 +35,14 @@ ALLOWED_JOB_TITLES = {
     'NLP Engineer',
     'Quant Researcher',
 }
+
+ALLOWED_EMPLOYMENT_TYPES = {"Full-time", "Part-time", "Contract", "Internship"}
+
+ALLOWED_EXPERIENCE_LEVELS = {"Entry", "Mid", "Senior"}   
+
+ALLOWED_COMPANY_SIZES = {"Small", "Mid", "Large"}        
+
+ALLOWED_VISA_SPONSORSHIP = {"Yes", "No"}                 
 
 # Cache TTL
 JOBS_LIST_TTL = 120        # 2 min
@@ -136,7 +146,7 @@ def create_employer_job():
         data = request.json
         user_id = g.user_id
 
-        # ⭐ ดึง company_name + industry จาก employer_profiles
+        # ดึง company_name + industry จาก employer_profiles
         emp_profile = db.session.execute(
             text("SELECT company_name, industry FROM employer_profiles WHERE user_id = :uid"),
             {"uid": user_id}
@@ -153,32 +163,56 @@ def create_employer_job():
         company_name = emp_profile["company_name"]
         industry_from_profile = emp_profile["industry"]
 
-        # sanitize inputs
+        # ─── Sanitize inputs ───
         job_title = sanitize_text(data.get("job_title") or "", max_length=100)
         location = sanitize_text(data.get("location") or "", max_length=200)
         skills_required = sanitize_text(data.get("skills_required") or "", max_length=1000)
-        tools_preferred = sanitize_text(data.get("tools_preferred") or "", max_length=1000)
         company_size = sanitize_text(data.get("company_size") or "", max_length=50)
+        team_size = sanitize_text(str(data.get("team_size") or ""), max_length=50)
+        visa_sponsorship = (data.get("visa_sponsorship") or "No").strip()
         about_role = sanitize_text(data.get("about_role") or "", max_length=5000)
         responsibilities = sanitize_text(data.get("responsibilities") or "", max_length=5000)
         requirements = sanitize_text(data.get("requirements") or "", max_length=5000)
 
+        # ─── Validate employment_type ───
         employment_type = (data.get("employment_type") or "Full-time").strip()
-        ALLOWED_EMPLOYMENT_TYPES = {"Full-time", "Part-time", "Contract", "Internship"}
         if employment_type not in ALLOWED_EMPLOYMENT_TYPES:
             return {
-                "error": {"code": "INVALID_EMPLOYMENT_TYPE",
-                          "message": f"ต้องเป็น: {', '.join(ALLOWED_EMPLOYMENT_TYPES)}"}
+                "error": {
+                    "code": "INVALID_EMPLOYMENT_TYPE",
+                    "message": f"ต้องเป็น: {', '.join(sorted(ALLOWED_EMPLOYMENT_TYPES))}"
+                }
             }, 400
 
+        # ─── Validate experience_level ───
         experience_level = (data.get("experience_level") or "Mid").strip()
-        ALLOWED_EXPERIENCE_LEVELS = {"Entry", "Mid", "Senior", "Lead"}
         if experience_level not in ALLOWED_EXPERIENCE_LEVELS:
             return {
-                "error": {"code": "INVALID_EXPERIENCE_LEVEL",
-                          "message": f"ต้องเป็น: {', '.join(ALLOWED_EXPERIENCE_LEVELS)}"}
+                "error": {
+                    "code": "INVALID_EXPERIENCE_LEVEL",
+                    "message": f"ต้องเป็น: {', '.join(sorted(ALLOWED_EXPERIENCE_LEVELS))}"
+                }
             }, 400
 
+        # ─── Validate company_size ───
+        if company_size and company_size not in ALLOWED_COMPANY_SIZES:
+            return {
+                "error": {
+                    "code": "INVALID_COMPANY_SIZE",
+                    "message": f"ต้องเป็น: {', '.join(sorted(ALLOWED_COMPANY_SIZES))}"
+                }
+            }, 400
+
+        # ─── Validate visa_sponsorship ───
+        if visa_sponsorship not in ALLOWED_VISA_SPONSORSHIP:
+            return {
+                "error": {
+                    "code": "INVALID_VISA_SPONSORSHIP",
+                    "message": "ต้องเป็น Yes หรือ No"
+                }
+            }, 400
+
+        # ─── Validate salary ───
         salary_min = data.get("salary_min")
         salary_max = data.get("salary_max")
         try:
@@ -194,6 +228,7 @@ def create_employer_job():
         if salary_min and salary_max and salary_min > salary_max:
             return {"error": {"code": "INVALID_SALARY", "message": "เงินเดือนต่ำสุดต้อง <= สูงสุด"}}, 400
 
+        # ─── Validate job_title ───
         if not job_title:
             return {"error": "Job title is required"}, 400
         if job_title not in ALLOWED_JOB_TITLES:
@@ -204,28 +239,31 @@ def create_employer_job():
                 )
             }, 400
 
-        # ⭐ NEW: parse expires_at (optional)
+        # ─── Parse expires_at (optional) ───
         raw_expires = data.get("expires_at")
         expires_at, err = _parse_expires_at(raw_expires)
         if err:
             return {"error": err}, 400
 
+        # ─── INSERT ───
         result = db.session.execute(
             text("""
                 INSERT INTO job_market_data (
                     job_title, company_name, location,
                     employment_type, experience_level,
                     salary_min, salary_max,
-                    skills_required, tools_preferred,
+                    skills_required,
                     industry, company_size,
+                    team_size, visa_sponsorship,
                     about_role, responsibilities, requirements,
                     posted_by_user_id, posted_date, expires_at, status
                 ) VALUES (
                     :job_title, :company_name, :location,
                     :employment_type, :experience_level,
                     :salary_min, :salary_max,
-                    :skills_required, :tools_preferred,
+                    :skills_required,
                     :industry, :company_size,
+                    :team_size, :visa_sponsorship,
                     :about_role, :responsibilities, :requirements,
                     :user_id, NOW(),
                     COALESCE(:expires_at, NOW() + INTERVAL '60 days'),
@@ -239,12 +277,13 @@ def create_employer_job():
                 "location": location or None,
                 "employment_type": employment_type,
                 "experience_level": experience_level,
-                "salary_min": float(salary_min) if salary_min else None,
+                "salary_min": salary_min,
                 "salary_max": int(salary_max) if salary_max else None,
                 "skills_required": skills_required or None,
-                "tools_preferred": tools_preferred or None,
                 "industry": industry_from_profile or None,
                 "company_size": company_size or None,
+                "team_size": team_size or None,
+                "visa_sponsorship": visa_sponsorship,
                 "about_role": about_role or None,
                 "responsibilities": responsibilities or None,
                 "requirements": requirements or None,
@@ -311,24 +350,41 @@ def update_employer_job(job_id):
         if not data:
             return {"error": {"code": "NO_DATA", "message": "No data provided"}}, 400
 
+        # ─── Sanitize ───
         job_title = sanitize_text(data.get("job_title") or "", max_length=100)
         location = sanitize_text(data.get("location") or "", max_length=200)
         skills_required = sanitize_text(data.get("skills_required") or "", max_length=1000)
-        tools_preferred = sanitize_text(data.get("tools_preferred") or "", max_length=1000)
         company_size = sanitize_text(data.get("company_size") or "", max_length=50)
+        team_size = sanitize_text(str(data.get("team_size") or ""), max_length=50)
+        visa_sponsorship = (data.get("visa_sponsorship") or "No").strip()
         about_role = sanitize_text(data.get("about_role") or "", max_length=5000)
         responsibilities = sanitize_text(data.get("responsibilities") or "", max_length=5000)
         requirements = sanitize_text(data.get("requirements") or "", max_length=5000)
 
+        # ─── Validate ───
         employment_type = (data.get("employment_type") or "Full-time").strip()
-        ALLOWED_EMPLOYMENT_TYPES = {"Full-time", "Part-time", "Contract", "Internship"}
         if employment_type not in ALLOWED_EMPLOYMENT_TYPES:
             return {"error": {"code": "INVALID_EMPLOYMENT_TYPE", "message": "Invalid type"}}, 400
 
         experience_level = (data.get("experience_level") or "Mid").strip()
-        ALLOWED_EXPERIENCE_LEVELS = {"Entry", "Mid", "Senior", "Lead"}
         if experience_level not in ALLOWED_EXPERIENCE_LEVELS:
             return {"error": {"code": "INVALID_EXPERIENCE_LEVEL", "message": "Invalid level"}}, 400
+
+        if company_size and company_size not in ALLOWED_COMPANY_SIZES:
+            return {
+                "error": {
+                    "code": "INVALID_COMPANY_SIZE",
+                    "message": f"ต้องเป็น: {', '.join(sorted(ALLOWED_COMPANY_SIZES))}"
+                }
+            }, 400
+
+        if visa_sponsorship not in ALLOWED_VISA_SPONSORSHIP:
+            return {
+                "error": {
+                    "code": "INVALID_VISA_SPONSORSHIP",
+                    "message": "ต้องเป็น Yes หรือ No"
+                }
+            }, 400
 
         salary_min = data.get("salary_min")
         salary_max = data.get("salary_max")
@@ -341,12 +397,12 @@ def update_employer_job(job_id):
         if not job_title or job_title not in ALLOWED_JOB_TITLES:
             return {"error": {"code": "INVALID_TITLE", "message": "Invalid job title"}}, 400
 
-        # ⭐ NEW: parse expires_at (optional)
         raw_expires = data.get("expires_at")
         expires_at, err = _parse_expires_at(raw_expires)
         if err:
             return {"error": err}, 400
 
+        # ─── UPDATE ───
         db.session.execute(
             text("""
                 UPDATE job_market_data SET
@@ -358,9 +414,10 @@ def update_employer_job(job_id):
                     salary_min = :salary_min,
                     salary_max = :salary_max,
                     skills_required = :skills_required,
-                    tools_preferred = :tools_preferred,
                     industry = :industry,
                     company_size = :company_size,
+                    team_size = :team_size,
+                    visa_sponsorship = :visa_sponsorship,
                     about_role = :about_role,
                     responsibilities = :responsibilities,
                     requirements = :requirements,
@@ -376,9 +433,10 @@ def update_employer_job(job_id):
                 "experience_level": experience_level,
                 "salary_min": salary_min, "salary_max": salary_max,
                 "skills_required": skills_required or None,
-                "tools_preferred": tools_preferred or None,
                 "industry": industry_from_profile or None,
                 "company_size": company_size or None,
+                "team_size": team_size or None,
+                "visa_sponsorship": visa_sponsorship,
                 "about_role": about_role or None,
                 "responsibilities": responsibilities or None,
                 "requirements": requirements or None,

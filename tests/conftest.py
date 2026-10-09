@@ -293,9 +293,8 @@ def make_job(app, make_user):
             "salary_min": 50000,
             "salary_max": 100000,
             "skills_required": "Python, SQL",
-            "tools_preferred": "Docker",
             "industry": "tech",
-            "company_size": "50-100",
+            "company_size": "Mid",
             "about_role": "Test role",
             "responsibilities": "Test",
             "requirements": "Test",
@@ -309,7 +308,7 @@ def make_job(app, make_user):
                         job_title, company_name, location,
                         employment_type, experience_level,
                         salary_min, salary_max,
-                        skills_required, tools_preferred,
+                        skills_required,
                         industry, company_size,
                         about_role, responsibilities, requirements,
                         posted_by_user_id, posted_date
@@ -317,7 +316,7 @@ def make_job(app, make_user):
                         :job_title, :company_name, :location,
                         :employment_type, :experience_level,
                         :salary_min, :salary_max,
-                        :skills_required, :tools_preferred,
+                        :skills_required,
                         :industry, :company_size,
                         :about_role, :responsibilities, :requirements,
                         :employer_id, NOW()

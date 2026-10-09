@@ -103,13 +103,13 @@ def get_application_detail(application_id):
         if not application:
             return {"error": "Application not found"}, 404
 
-        # ⭐ ตรวจเจ้าของ
+        # ตรวจเจ้าของ
         if application["user_id"] != g.user_id:
             return {"error": {"code": "FORBIDDEN", "message": "ไม่มีสิทธิ์"}}, 403
 
         skills_result = db.session.execute(
             text("""
-                SELECT skill_name, skill_level 
+                SELECT skill_name 
                 FROM application_skills WHERE application_id = :application_id
             """),
             {"application_id": application_id}
@@ -289,15 +289,14 @@ def create_application():
             db.session.execute(
                 text("""
                     INSERT INTO application_skills
-                        (application_id, skill_name, skill_level)
+                        (application_id, skill_name)
                     VALUES
-                        (:application_id, :skill_name, :skill_level)
+                        (:application_id, :skill_name)
                 """),
                 [
                     {
                         "application_id": application_id,
                         "skill_name": s.get("name") or s.get("skill_name"),
-                        "skill_level": s.get("level") or s.get("skill_level", "Intermediate")
                     }
                     for s in skills
                 ]

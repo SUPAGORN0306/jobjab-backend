@@ -146,7 +146,7 @@ def update_employer_profile():
 
         db.session.commit()
 
-        # ⭐ Clear cache
+        # Clear cache
         invalidate_jobs_cache()
         cache.delete(f"employer_jobs:emp{user_id}")
 

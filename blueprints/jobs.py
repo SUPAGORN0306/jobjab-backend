@@ -69,7 +69,7 @@ def get_jobs():
         # ═══════════════════════════════════════
         # 3. WHERE CLAUSE
         # ═══════════════════════════════════════
-        where_parts = []
+        where_parts = ["(j.status = 'active' OR j.status IS NULL)"]
         params = {}
 
         if q:
@@ -131,12 +131,12 @@ def get_jobs():
         # 6. FETCH PAGE
         # ═══════════════════════════════════════
         if is_match_sort:
-            # ⭐ fetch ทั้งหมด (ไม่ LIMIT) — จะ sort + paginate ใน Python
+            # fetch ทั้งหมด (ไม่ LIMIT) — จะ sort + paginate ใน Python
             result = db.session.execute(text(f"""
                 SELECT
                     j.id, j.company_name, j.industry, j.job_title,
                     j.skills_required, j.experience_level, j.employment_type,
-                    j.location, j.posted_date, j.company_size, j.tools_preferred,
+                    j.location, j.posted_date, j.company_size,
                     j.salary_min, j.salary_max,
                     COUNT(a.id) AS applicant_count
                 FROM job_market_data j
@@ -150,7 +150,7 @@ def get_jobs():
                 SELECT
                     j.id, j.company_name, j.industry, j.job_title,
                     j.skills_required, j.experience_level, j.employment_type,
-                    j.location, j.posted_date, j.company_size, j.tools_preferred,
+                    j.location, j.posted_date, j.company_size,
                     j.salary_min, j.salary_max,
                     COUNT(a.id) AS applicant_count
                 FROM job_market_data j
@@ -216,7 +216,6 @@ def get_jobs():
                 "work_mode": "Remote",
                 "skills_required": job_dict.get("skills_required"),
                 "company_size": job_dict.get("company_size"),
-                "tools_preferred": job_dict.get("tools_preferred"),
                 "posted_date": job_dict.get("posted_date"),
                 "company_name": job_dict.get("company_name"),
                 "job_title": job_dict.get("job_title"),
@@ -304,12 +303,13 @@ def get_job_detail(job_id):
                 SELECT 
                     id, company_name, industry, job_title,
                     skills_required, experience_level, employment_type,
-                    location, posted_date, company_size, tools_preferred,
+                    location, posted_date, company_size,
                     salary_min, salary_max, about_role, responsibilities,
                     requirements, team_size, visa_sponsorship, posted_ago,
                     match_score
                 FROM job_market_data 
                 WHERE id = :job_id
+                AND (status = 'active' OR status IS NULL)
             """),
             {"job_id": job_id}
         )

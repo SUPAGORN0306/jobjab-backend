@@ -105,7 +105,7 @@ def get_application_snapshot(application_id):
         # 3. Snapshot: skills / experiences / educations
         skills_result = db.session.execute(
             text("""
-                SELECT skill_name, skill_level 
+                SELECT skill_name 
                 FROM application_skills WHERE application_id = :aid
                 ORDER BY id
             """),
