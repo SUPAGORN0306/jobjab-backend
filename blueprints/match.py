@@ -20,22 +20,25 @@ def get_match_score(job_id):
     try:
         user_id = request.args.get("user_id", type=int)
         if not user_id:
-            return {"error": "user_id is required"}, 400
+            return {"error": {"code": "MISSING_USER_ID",
+                    "message": "user_id is required"}}, 400
 
         job = db.session.execute(
             text("""
-                SELECT id, skills_required, experience_level, industry
+                SELECT id, skills_required, experience_level, industry, location
                 FROM job_market_data WHERE id = :jid
             """),
             {"jid": job_id}
         ).mappings().first()
 
         if not job:
-            return {"error": "Job not found"}, 404
+            return {"error": {"code": "NOT_FOUND",
+                    "message": "Job not found"}}, 404
 
         user_data = load_user_data(user_id, db.session)
         match = calculate_match_score_v2(dict(job), user_data)
         return match, 200
     except Exception as e:
         logger.error("get_match_score_failed", error=str(e), exc_info=True)
-        return {"error": str(e)}, 500
+        return {"error": {"code": "INTERNAL_ERROR",
+                "message": "Something went wrong"}}, 500

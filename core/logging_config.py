@@ -1,9 +1,9 @@
 """
-logging_config.py — Structured logging ด้วย structlog
+logging_config.py — Structured logging with structlog
 
-- Dev: อ่านง่าย (colorized console)
-- Prod: JSON (parse ได้ด้วย log aggregator เช่น Datadog, Sentry)
-- แทน print() ทั้งหมด
+- Dev:  easy to read (colorized console)
+- Prod: JSON (parseable by log aggregators like Datadog, Sentry)
+- Replaces all print() calls
 """
 import logging
 import sys
@@ -14,19 +14,19 @@ from core.config import settings
 
 
 def setup_logging() -> None:
-    """ตั้งค่า logging — เรียกครั้งเดียวตอน app start"""
+    """Configure logging — call once at app start."""
 
     # ---------- Log level ----------
     log_level = getattr(logging, settings.LOG_LEVEL)
 
-    # ---------- Standard logging (ให้ library ใช้) ----------
+    # ---------- Standard logging (for libraries) ----------
     logging.basicConfig(
         format="%(message)s",
         stream=sys.stdout,
         level=log_level,
     )
 
-    # ---------- ลด noise จาก library ----------
+    # ---------- Reduce library noise ----------
     logging.getLogger("werkzeug").setLevel(logging.WARNING)
     logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
     logging.getLogger("urllib3").setLevel(logging.WARNING)
@@ -63,5 +63,5 @@ def setup_logging() -> None:
 
 
 def get_logger(name: str = __name__):
-    """Helper สำหรับดึง logger"""
+    """Helper to get a logger."""
     return structlog.get_logger(name)

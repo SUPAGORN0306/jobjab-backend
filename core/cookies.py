@@ -1,10 +1,10 @@
 """
-cookies.py — Cookie helpers สำหรับ httpOnly auth tokens
+cookies.py — Cookie helpers for httpOnly auth tokens
 
 Strategy:
-- access_token  : httpOnly, 15 นาที
-- refresh_token : httpOnly, 7 วัน, path=/api/auth (จำกัด)
-- csrf_token    : readable (JS อ่านได้), ใช้คู่กับ header X-CSRF-Token
+- access_token  : httpOnly, 15 minutes
+- refresh_token : httpOnly, 7 days, path=/api/auth (restricted)
+- csrf_token    : readable by JS, used with X-CSRF-Token header
 """
 from flask import Response
 
@@ -23,9 +23,9 @@ CSRF_COOKIE = "csrf_token"
 
 def _base_cookie_kwargs() -> dict:
     """
-    Cookie options พื้นฐาน
+    Base cookie options:
     - dev  (secure=False) : SameSite=Lax
-    - prod (secure=True)  : SameSite=None (cross-site Vercel → Render)
+    - prod (secure=True)  : SameSite=None (cross-site: Vercel → Render)
     """
     return {
         "secure": settings.cookie_secure,
@@ -40,7 +40,7 @@ def _base_cookie_kwargs() -> dict:
 # ============================================================
 
 def set_access_cookie(response: Response, token: str) -> Response:
-    """Access token cookie — httpOnly, อายุ 15 นาที"""
+    """Access token cookie — httpOnly, 15-minute lifetime."""
     response.set_cookie(
         ACCESS_COOKIE,
         token,
@@ -53,11 +53,11 @@ def set_access_cookie(response: Response, token: str) -> Response:
 
 def set_refresh_cookie(response: Response, token: str) -> Response:
     """
-    Refresh token cookie — httpOnly, อายุ 7 วัน
-    Path จำกัดที่ /api/auth → cookie ส่งแค่ตอน refresh/logout
+    Refresh token cookie — httpOnly, 7-day lifetime.
+    Path restricted to /api/auth → only sent for refresh/logout.
     """
     kwargs = _base_cookie_kwargs()
-    kwargs["path"] = "/api/auth"  # ← จำกัด path
+    kwargs["path"] = "/api/auth"
 
     response.set_cookie(
         REFRESH_COOKIE,
@@ -71,14 +71,14 @@ def set_refresh_cookie(response: Response, token: str) -> Response:
 
 def set_csrf_cookie(response: Response, token: str) -> Response:
     """
-    CSRF token cookie — readable (JS อ่านได้)
-    ไม่ httpOnly เพราะ frontend ต้องอ่านไปใส่ header
+    CSRF token cookie — readable by JS.
+    Not httpOnly because frontend needs to read and send as header.
     """
     response.set_cookie(
         CSRF_COOKIE,
         token,
         max_age=settings.CSRF_TOKEN_EXPIRES_HOURS * 3600,
-        httponly=False,  # ← JS ต้องอ่านได้
+        httponly=False,
         secure=settings.cookie_secure,
         domain=settings.COOKIE_DOMAIN or None,
         samesite="None" if settings.cookie_secure else "Lax",
@@ -88,8 +88,8 @@ def set_csrf_cookie(response: Response, token: str) -> Response:
 
 
 def clear_all_auth_cookies(response: Response) -> Response:
-    """ลบ cookies ทั้งหมด — ใช้ตอน logout"""
-    # Cookie path="/" — access + csrf
+    """Clear all auth cookies — used on logout."""
+    # path="/" — access + csrf
     for name in (ACCESS_COOKIE, CSRF_COOKIE):
         response.delete_cookie(
             name,
@@ -97,7 +97,7 @@ def clear_all_auth_cookies(response: Response) -> Response:
             domain=settings.COOKIE_DOMAIN or None,
         )
 
-    # refresh token มี path ต่าง
+    # refresh token has a different path
     response.delete_cookie(
         REFRESH_COOKIE,
         path="/api/auth",
@@ -113,7 +113,7 @@ def set_auth_cookies(
     refresh_token: str,
     csrf_token: str,
 ) -> Response:
-    """Helper: set ทั้ง 3 cookies ทีเดียว (ตอน login)"""
+    """Helper: set all 3 cookies at once (on login)."""
     set_access_cookie(response, access_token)
     set_refresh_cookie(response, refresh_token)
     set_csrf_cookie(response, csrf_token)

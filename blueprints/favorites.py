@@ -8,7 +8,7 @@ Routes:
 from sqlalchemy import text
 from flask import Blueprint, request, g
 
-from core.extensions import db
+from core.extensions import db, cache
 from core.security import require_auth
 from core.logging_config import get_logger
 from services.match_score import load_user_data, calculate_match_score_v2
@@ -26,12 +26,12 @@ def get_favorites():
 
         result = db.session.execute(
             text("""
-                SELECT 
+                SELECT
                     f.id, f.user_id, f.job_id, f.created_at,
                     j.job_title, j.company_name, j.location,
                     j.salary_min, j.salary_max, j.industry,
                     j.experience_level, j.employment_type,
-                    j.skills_required, j.posted_date  
+                    j.skills_required, j.posted_date
                 FROM favorites f
                 LEFT JOIN job_market_data j ON f.job_id = j.id
                 WHERE f.user_id = :user_id
@@ -41,14 +41,12 @@ def get_favorites():
         )
         rows = result.mappings().all()
 
-        # ── Load user data once for match scoring ──
         user_data = load_user_data(user_id, db.session)
 
         favorites = []
         for row in rows:
             fav_dict = serialize_row(row)
 
-            # Calculate match score
             try:
                 job_dict = {
                     "skills_required": row.get("skills_required"),
@@ -66,7 +64,8 @@ def get_favorites():
                 fav_dict["matched_skills"] = match.get("matched_skills", [])
                 fav_dict["missing_skills"] = match.get("missing_skills", [])
             except Exception as e:
-                logger.warning("favorite_match_calc_failed", job_id=row.get("job_id"), error=str(e))
+                logger.warning("favorite_match_calc_failed",
+                               job_id=row.get("job_id"), error=str(e))
                 fav_dict["match_score"] = 0
                 fav_dict["match_breakdown"] = {"skills": 0, "experience": 0, "industry": 0}
                 fav_dict["matched_skills"] = []
@@ -74,10 +73,11 @@ def get_favorites():
 
             favorites.append(fav_dict)
 
-        return {"favorites": favorites}
+        return {"favorites": favorites}, 200
     except Exception as e:
         logger.error("get_favorites_failed", error=str(e), exc_info=True)
-        return {"error": str(e)}, 500
+        return {"error": {"code": "INTERNAL_ERROR",
+                "message": "Failed to load favorites"}}, 500
 
 
 @bp.route("/favorites/toggle", methods=["POST"])
@@ -88,7 +88,8 @@ def toggle_favorite():
     job_id = data.get("job_id")
 
     if not job_id:
-        return {"error": "job_id is required"}, 400
+        return {"error": {"code": "MISSING_JOB_ID",
+                "message": "job_id is required"}}, 400
 
     try:
         job_check = db.session.execute(
@@ -96,7 +97,8 @@ def toggle_favorite():
             {"jid": job_id}
         ).first()
         if not job_check:
-            return {"error": "Job not found"}, 404
+            return {"error": {"code": "JOB_NOT_FOUND",
+                    "message": "Job not found"}}, 404
 
         check = db.session.execute(
             text("SELECT id FROM favorites WHERE user_id = :user_id AND job_id = :job_id"),
@@ -111,7 +113,7 @@ def toggle_favorite():
             )
             db.session.commit()
             logger.info("favorite_removed", user_id=user_id, job_id=job_id)
-            return {"favorited": False, "message": "Removed from favorites"}
+            return {"favorited": False, "message": "Removed from favorites"}, 200
         else:
             db.session.execute(
                 text("INSERT INTO favorites (user_id, job_id) VALUES (:user_id, :job_id)"),
@@ -119,9 +121,10 @@ def toggle_favorite():
             )
             db.session.commit()
             logger.info("favorite_added", user_id=user_id, job_id=job_id)
-            return {"favorited": True, "message": "Added to favorites"}
+            return {"favorited": True, "message": "Added to favorites"}, 200
 
     except Exception as e:
         db.session.rollback()
         logger.error("toggle_favorite_failed", error=str(e), exc_info=True)
-        return {"error": str(e)}, 500
+        return {"error": {"code": "INTERNAL_ERROR",
+                "message": "Something went wrong"}}, 500

@@ -7,7 +7,7 @@ Routes:
 - PUT /api/profile/<int:user_id>
 """
 from sqlalchemy import text
-from sqlalchemy.exc import IntegrityError 
+from sqlalchemy.exc import IntegrityError
 from flask import Blueprint, request, g
 
 from core.extensions import db, invalidate_jobs_cache
@@ -23,16 +23,15 @@ logger = get_logger(__name__)
 @bp.route("/profile/<int:user_id>", methods=["GET"])
 @require_auth
 def get_profile(user_id):
-    # ⭐ ตรวจเจ้าของ
     if user_id != g.user_id:
-        return {"error": {"code": "FORBIDDEN", "message": "ไม่มีสิทธิ์"}}, 403
+        return {"error": {"code": "FORBIDDEN", "message": "Forbidden"}}, 403
 
     try:
         result = db.session.execute(
             text("""
-                SELECT id, username, email, full_name, phone, location, 
+                SELECT id, username, email, full_name, phone, location,
                        bio, profile_image, created_at
-                FROM users 
+                FROM users
                 WHERE id = :user_id
             """),
             {"user_id": user_id}
@@ -40,24 +39,26 @@ def get_profile(user_id):
         user = result.mappings().first()
 
         if not user:
-            return {"error": "User not found"}, 404
+            return {"error": {"code": "NOT_FOUND",
+                    "message": "User not found"}}, 404
 
-        return {"profile": serialize_row(user)}
+        return {"profile": serialize_row(user)}, 200
     except Exception as e:
-        return {"error": str(e)}, 500
+        logger.error("get_profile_failed", error=str(e), exc_info=True)
+        return {"error": {"code": "INTERNAL_ERROR",
+                "message": "Something went wrong"}}, 500
 
 
 @bp.route("/profile/<int:user_id>/full", methods=["GET"])
 @require_auth
 def get_full_profile(user_id):
-    # ⭐ ตรวจเจ้าของ
     if user_id != g.user_id:
-        return {"error": {"code": "FORBIDDEN", "message": "ไม่มีสิทธิ์"}}, 403
+        return {"error": {"code": "FORBIDDEN", "message": "Forbidden"}}, 403
 
     try:
         user_result = db.session.execute(
             text("""
-                SELECT id, username, email, full_name, phone, location, 
+                SELECT id, username, email, full_name, phone, location,
                     bio, profile_image, industry, resume_url, resume_filename,
                     created_at, updated_at
                 FROM users WHERE id = :user_id
@@ -66,11 +67,12 @@ def get_full_profile(user_id):
         )
         user = user_result.mappings().first()
         if not user:
-            return {"error": "User not found"}, 404
+            return {"error": {"code": "NOT_FOUND",
+                    "message": "User not found"}}, 404
 
         skills_result = db.session.execute(
             text("""
-                SELECT id, skill_name, skill_level 
+                SELECT id, skill_name, skill_level
                 FROM user_skills WHERE user_id = :user_id
                 ORDER BY id
             """),
@@ -80,7 +82,7 @@ def get_full_profile(user_id):
 
         exp_result = db.session.execute(
             text("""
-                SELECT id, job_title, company_name, location, 
+                SELECT id, job_title, company_name, location,
                        start_date, end_date, is_current, description
                 FROM user_experience WHERE user_id = :user_id
                 ORDER BY start_date DESC NULLS FIRST
@@ -108,32 +110,31 @@ def get_full_profile(user_id):
         }, 200
 
     except Exception as e:
-        logger.error("operation_failed", error=str(e), exc_info=True)
-        return {"error": {"code": "INTERNAL_ERROR", "message": "เกิดข้อผิดพลาด"}}, 500
+        logger.error("get_full_profile_failed", error=str(e), exc_info=True)
+        return {"error": {"code": "INTERNAL_ERROR",
+                "message": "Something went wrong"}}, 500
 
 
 @bp.route("/profile/<int:user_id>", methods=["PUT"])
 @require_auth
 def update_profile(user_id):
-    # ⭐ ตรวจเจ้าของ
     if user_id != g.user_id:
-        return {"error": {"code": "FORBIDDEN", "message": "ไม่มีสิทธิ์"}}, 403
+        return {"error": {"code": "FORBIDDEN", "message": "Forbidden"}}, 403
 
     try:
         data = request.json
 
         if not data:
-            return {"error": "No data provided"}, 400
+            return {"error": {"code": "NO_DATA",
+                    "message": "No data provided"}}, 400
 
-        # ⭐ Sprint 3: Validation + Sanitize
-        # Phone validation
         phone = data.get("phone")
         if phone:
             if not is_valid_phone(phone):
-                return {"error": {"code": "INVALID_PHONE", "message": "เบอร์โทรไม่ถูกต้อง"}}, 400
+                return {"error": {"code": "INVALID_PHONE",
+                        "message": "Invalid phone number"}}, 400
             phone = normalize_phone(phone)
 
-        # Sanitize text (XSS protection)
         full_name = sanitize_text(data.get("full_name") or "", max_length=100) or None
         bio = sanitize_text(data.get("bio") or "", max_length=2000) or None
         location = sanitize_text(data.get("location") or "", max_length=200) or None
@@ -141,7 +142,7 @@ def update_profile(user_id):
 
         db.session.execute(
             text("""
-                UPDATE users 
+                UPDATE users
                 SET full_name = COALESCE(:full_name, full_name),
                     phone = COALESCE(:phone, phone),
                     location = COALESCE(:location, location),
@@ -191,10 +192,10 @@ def update_profile(user_id):
             if data["experiences"]:
                 db.session.execute(
                     text("""
-                        INSERT INTO user_experience 
+                        INSERT INTO user_experience
                             (user_id, job_title, company_name, location,
                              start_date, end_date, is_current, description)
-                        VALUES 
+                        VALUES
                             (:user_id, :job_title, :company_name, :location,
                              :start_date, :end_date, :is_current, :description)
                     """),
@@ -221,10 +222,10 @@ def update_profile(user_id):
             if data["educations"]:
                 db.session.execute(
                     text("""
-                        INSERT INTO user_education 
+                        INSERT INTO user_education
                             (user_id, institution, degree, field_of_study,
                              start_date, end_date, is_current, gpa)
-                        VALUES 
+                        VALUES
                             (:user_id, :institution, :degree, :field_of_study,
                              :start_date, :end_date, :is_current, :gpa)
                     """),
@@ -252,8 +253,11 @@ def update_profile(user_id):
 
     except IntegrityError as e:
         db.session.rollback()
-        return {"error": "Constraint violation", "detail": str(e)}, 409
+        logger.warning("profile_integrity_error", error=str(e))
+        return {"error": {"code": "CONSTRAINT_VIOLATION",
+                "message": "Invalid data. Please check your input."}}, 409
     except Exception as e:
         db.session.rollback()
-        logger.error("operation_failed", error=str(e), exc_info=True)
-        return {"error": {"code": "INTERNAL_ERROR", "message": "เกิดข้อผิดพลาด"}}, 500
+        logger.error("update_profile_failed", error=str(e), exc_info=True)
+        return {"error": {"code": "INTERNAL_ERROR",
+                "message": "Something went wrong"}}, 500

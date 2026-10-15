@@ -1,10 +1,10 @@
 """
 config.py — Type-safe configuration (pydantic-settings)
 
-ข้อดี:
-- Fail-fast: ถ้า env ขาด/ผิด format → แอปไม่ start (รู้ทันที)
-- Type-safe: IDE autocomplete ได้
-- Validate: ตรวจ DATABASE_URL, SUPABASE_URL อัตโนมัติ
+Benefits:
+- Fail-fast: if env is missing/malformed → app won't start
+- Type-safe: IDE autocomplete works
+- Validated: DATABASE_URL, SUPABASE_URL checked automatically
 """
 from functools import lru_cache
 from typing import Literal
@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     ENV: Literal["development", "staging", "production"] = "development"
     FLASK_APP: str = "app.py"
     FLASK_DEBUG: int = 0
+    PORT: int = 5000                     # ← ⭐ เพิ่มบรรทัดนี้
 
     # ---------- Database ----------
     DATABASE_URL: str
@@ -88,7 +89,9 @@ class Settings(BaseSettings):
     @classmethod
     def _validate_db(cls, v: str) -> str:
         if not v.startswith(("postgresql://", "postgres://", "sqlite://")):
-            raise ValueError("DATABASE_URL ต้องขึ้นต้นด้วย postgresql:// หรือ sqlite:// (test)")
+            raise ValueError(
+                "DATABASE_URL must start with postgresql:// or sqlite:// (test)"
+            )
         return v
 
     @field_validator("SUPABASE_URL")
@@ -96,14 +99,14 @@ class Settings(BaseSettings):
     def _validate_supabase(cls, v: str) -> str:
         if "/rest/v1" in v or "/storage/v1" in v:
             raise ValueError(
-                "SUPABASE_URL ต้องเป็น base URL เท่านั้น (ไม่มี /rest/v1 หรือ /storage/v1)"
+                "SUPABASE_URL must be a base URL only (no /rest/v1 or /storage/v1)"
             )
         return v.rstrip("/")
 
 
 @lru_cache
 def get_settings() -> Settings:
-    """Cache settings — อ่าน .env ครั้งเดียว"""
+    """Cache settings — read .env once."""
     return Settings()  # type: ignore[call-arg]
 
 

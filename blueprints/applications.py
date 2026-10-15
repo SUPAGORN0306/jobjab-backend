@@ -7,7 +7,9 @@ Routes:
 - GET /api/applications/user/<int:user_id>
 - GET /api/applications/<int:application_id>/detail
 """
+
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 from flask import Blueprint, request, jsonify, g
 
 from core.extensions import db, invalidate_jobs_cache
@@ -26,13 +28,12 @@ logger = get_logger(__name__)
 @bp.route("/applications", methods=["GET"])
 @require_auth
 def get_applications():
-    # ⭐ return เฉพาะของตัวเอง
     try:
         sql = text("""
-            SELECT 
+            SELECT
                 a.id, a.job_id, a.status, a.full_name, a.email, a.phone,
                 a.applied_date, a.updated_at,
-                j.job_title as title, j.company_name as company, 
+                j.job_title as title, j.company_name as company,
                 j.location, j.salary_min, j.salary_max
             FROM applications a
             LEFT JOIN job_market_data j ON a.job_id = j.id
@@ -46,20 +47,21 @@ def get_applications():
             "applications": [serialize_row(row) for row in rows]
         }), 200
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
+        logger.error("get_applications_failed", error=str(e), exc_info=True)
+        return jsonify({"error": {"code": "INTERNAL_ERROR",
+                "message": "Failed to load applications"}}), 500
+    
 
 @bp.route("/applications/user/<int:user_id>", methods=["GET"])
 @require_auth
 def get_user_applications(user_id):
-    # ⭐ ตรวจเจ้าของ
     if user_id != g.user_id:
-        return {"error": {"code": "FORBIDDEN", "message": "ไม่มีสิทธิ์"}}, 403
+        return {"error": {"code": "FORBIDDEN", "message": "Forbidden"}}, 403
 
     try:
         result = db.session.execute(
             text("""
-                SELECT 
+                SELECT
                     a.id, a.job_id, a.status, a.full_name, a.email, a.phone,
                     a.cover_letter, a.applied_date, a.updated_at,
                     j.job_title, j.company_name as company,
@@ -72,9 +74,11 @@ def get_user_applications(user_id):
             {"user_id": user_id}
         )
         rows = result.mappings().all()
-        return {"applications": [serialize_row(row) for row in rows]}
+        return {"applications": [serialize_row(row) for row in rows]}, 200
     except Exception as e:
-        return {"error": str(e)}, 500
+        logger.error("get_user_applications_failed", error=str(e), exc_info=True)
+        return {"error": {"code": "INTERNAL_ERROR",
+                "message": "Failed to load applications"}}, 500
 
 
 @bp.route("/applications/<int:application_id>/detail", methods=["GET"])
@@ -83,7 +87,7 @@ def get_application_detail(application_id):
     try:
         app_result = db.session.execute(
             text("""
-                SELECT 
+                SELECT
                     a.id, a.user_id, a.job_id, a.status,
                     a.full_name, a.email, a.phone, a.location,
                     a.resume_filename, a.resume_url, a.cover_letter,
@@ -101,15 +105,15 @@ def get_application_detail(application_id):
 
         application = app_result.mappings().first()
         if not application:
-            return {"error": "Application not found"}, 404
+            return {"error": {"code": "NOT_FOUND",
+                    "message": "Application not found"}}, 404
 
-        # ตรวจเจ้าของ
         if application["user_id"] != g.user_id:
-            return {"error": {"code": "FORBIDDEN", "message": "ไม่มีสิทธิ์"}}, 403
+            return {"error": {"code": "FORBIDDEN", "message": "Forbidden"}}, 403
 
         skills_result = db.session.execute(
             text("""
-                SELECT skill_name 
+                SELECT skill_name
                 FROM application_skills WHERE application_id = :application_id
             """),
             {"application_id": application_id}
@@ -146,8 +150,9 @@ def get_application_detail(application_id):
         }, 200
 
     except Exception as e:
-        logger.error("operation_failed", error=str(e), exc_info=True)
-        return {"error": {"code": "INTERNAL_ERROR", "message": "เกิดข้อผิดพลาด"}}, 500
+        logger.error("get_application_detail_failed", error=str(e), exc_info=True)
+        return {"error": {"code": "INTERNAL_ERROR",
+                "message": "Something went wrong"}}, 500
 
 
 @bp.route("/applications", methods=["POST"])
@@ -157,13 +162,13 @@ def create_application():
         data = request.json
 
         if not data:
-            return {"error": "No data provided"}, 400
+            return {"error": {"code": "NO_DATA",
+                    "message": "No data provided"}}, 400
 
-        # ⭐ ใช้ g.user_id
         user_id = g.user_id
         job_id = data.get("jobId") or data.get("job_id")
 
-        # ⭐ Sprint 3: Validation + Sanitize
+        # Sanitize
         full_name = sanitize_text(
             data.get("fullName") or data.get("full_name") or "",
             max_length=100,
@@ -171,13 +176,15 @@ def create_application():
 
         email_raw = (data.get("email") or "").strip().lower()
         if email_raw and not is_valid_email(email_raw):
-            return {"error": {"code": "INVALID_EMAIL", "message": "อีเมลไม่ถูกต้อง"}}, 400
+            return {"error": {"code": "INVALID_EMAIL",
+                    "message": "Invalid email format"}}, 400
         email = email_raw or None
 
         phone = data.get("phone")
         if phone:
             if not is_valid_phone(phone):
-                return {"error": {"code": "INVALID_PHONE", "message": "เบอร์โทรไม่ถูกต้อง"}}, 400
+                return {"error": {"code": "INVALID_PHONE",
+                        "message": "Invalid phone number"}}, 400
             phone = normalize_phone(phone)
 
         location = sanitize_text(
@@ -192,7 +199,8 @@ def create_application():
 
         resume_url = data.get("resumeUrl") or data.get("resume_url") or ""
         if resume_url and not is_supabase_url(resume_url):
-            return {"error": {"code": "INVALID_RESUME_URL", "message": "URL resume ไม่ถูกต้อง"}}, 400
+            return {"error": {"code": "INVALID_RESUME_URL",
+                    "message": "Invalid resume URL"}}, 400
 
         cover_letter = sanitize_text(
             data.get("coverLetter") or data.get("cover_letter") or "",
@@ -202,6 +210,7 @@ def create_application():
         skills = data.get("skills", [])
         experiences = data.get("experiences", [])
         educations = data.get("educations", [])
+
         if not experiences:
             exp_rows = db.session.execute(
                 text("""
@@ -229,12 +238,15 @@ def create_application():
             educations = [dict(r) for r in edu_rows]
 
         if not job_id:
-            return {"error": "job_id is required"}, 400
+            return {"error": {"code": "MISSING_JOB_ID",
+                    "message": "job_id is required"}}, 400
         if not full_name or not email:
-            return {"error": "full_name and email are required"}, 400
+            return {"error": {"code": "MISSING_FIELDS",
+                    "message": "full_name and email are required"}}, 400
 
         if not resume_url:
-            return {"error": "Please upload a resume first"}, 400
+            return {"error": {"code": "MISSING_RESUME",
+                    "message": "Please upload a resume first"}}, 400
 
         check = db.session.execute(
             text("""
@@ -244,7 +256,8 @@ def create_application():
             {"user_id": user_id, "job_id": job_id}
         )
         if check.first():
-            return {"error": "You have already applied for this position"}, 400
+            return {"error": {"code": "ALREADY_APPLIED",
+                    "message": "You have already applied for this position"}}, 400
 
         job_check = db.session.execute(
             text("""
@@ -256,10 +269,12 @@ def create_application():
 
         job_row = job_check.first()
         if not job_row:
-            return {"error": "Job not found"}, 404
+            return {"error": {"code": "JOB_NOT_FOUND",
+                    "message": "Job not found"}}, 404
 
         if job_row[1] and job_row[1] == user_id:
-            return {"error": "You cannot apply to a job that you posted"}, 400
+            return {"error": {"code": "OWN_JOB",
+                    "message": "You cannot apply to a job that you posted"}}, 400
 
         result = db.session.execute(
             text("""
@@ -364,14 +379,17 @@ def create_application():
 
         return {
             "status": "success",
-            "message": "Application submitted successfully!",
+            "message": "Application submitted successfully",
             "application_id": application_id
         }, 201
 
     except IntegrityError as e:
         db.session.rollback()
-        return {"error": "Integrity error", "detail": str(e)}, 409
+        logger.warning("application_integrity_error", error=str(e))
+        return {"error": {"code": "INTEGRITY_ERROR",
+                "message": "Invalid data. Please check your input."}}, 409
     except Exception as e:
         db.session.rollback()
-        logger.error("operation_failed", error=str(e), exc_info=True)
-        return {"error": {"code": "INTERNAL_ERROR", "message": "เกิดข้อผิดพลาด"}}, 500
+        logger.error("create_application_failed", error=str(e), exc_info=True)
+        return {"error": {"code": "INTERNAL_ERROR",
+                "message": "Something went wrong"}}, 500

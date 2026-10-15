@@ -5,7 +5,7 @@ Routes:
 - POST   /api/upload/resume
 - DELETE /api/resume/<int:user_id>
 - POST   /api/upload/avatar
-- POST   /api/upload/company-logo   ⭐ ไม่ UPDATE DB — return URL เท่านั้น
+- POST   /api/upload/company-logo   (Note: does NOT update DB — returns URL only)
 """
 import uuid
 
@@ -38,28 +38,33 @@ logger = get_logger(__name__)
 @bp.route("/upload/resume", methods=["POST"])
 @require_auth
 def upload_resume():
-    """อัปโหลด Resume (PDF เท่านั้น) → Supabase Storage"""
+    """Upload Resume (PDF only) → Supabase Storage."""
     try:
         user_id = g.user_id
 
         if "resume" not in request.files:
-            return {"error": "No file provided"}, 400
+            return {"error": {"code": "NO_FILE",
+                    "message": "No file provided"}}, 400
 
         file = request.files["resume"]
 
         if file.filename == "":
-            return {"error": "Empty filename"}, 400
+            return {"error": {"code": "EMPTY_FILENAME",
+                    "message": "Empty filename"}}, 400
 
         if not is_safe_filename(file.filename):
-            return {"error": "Invalid filename"}, 400
+            return {"error": {"code": "INVALID_FILENAME",
+                    "message": "Invalid filename"}}, 400
 
         if not allowed_resume_file(file.filename):
-            return {"error": "Only PDF files are allowed for resume"}, 400
+            return {"error": {"code": "INVALID_FILE_TYPE",
+                    "message": "Only PDF files are allowed for resume"}}, 400
 
         file_bytes = file.read()
 
         if not validate_file_magic(file_bytes, ["pdf"]):
-            return {"error": "File is not a valid PDF"}, 400
+            return {"error": {"code": "INVALID_FILE",
+                    "message": "File is not a valid PDF"}}, 400
 
         original_filename = file.filename
         safe_filename = secure_filename(original_filename) or f"resume_{user_id}.pdf"
@@ -81,15 +86,17 @@ def upload_resume():
         upload_res = sb_upload("resumes", storage_filename, file_bytes, "application/pdf")
 
         if upload_res.status_code not in (200, 201):
-            logger.error("supabase_upload_failed", status=upload_res.status_code, response=upload_res.text[:200])
-            return {"error": f"Upload failed: {upload_res.text}"}, 500
+            logger.error("supabase_upload_failed", status=upload_res.status_code,
+                         response=upload_res.text[:200])
+            return {"error": {"code": "UPLOAD_FAILED",
+                    "message": f"Upload failed: {upload_res.text}"}}, 500
 
         resume_url = sb_public_url("resumes", storage_filename)
 
         db.session.execute(
             text("""
-                UPDATE users 
-                SET resume_url = :url, 
+                UPDATE users
+                SET resume_url = :url,
                     resume_filename = :filename,
                     updated_at = NOW()
                 WHERE id = :uid
@@ -98,12 +105,8 @@ def upload_resume():
         )
         db.session.commit()
 
-        logger.info(
-            "resume_uploaded",
-            user_id=user_id,
-            filename=safe_filename,
-            size_bytes=len(file_bytes),
-        )
+        logger.info("resume_uploaded", user_id=user_id,
+                    filename=safe_filename, size_bytes=len(file_bytes))
 
         return {
             "status": "success",
@@ -115,15 +118,16 @@ def upload_resume():
     except Exception as e:
         db.session.rollback()
         logger.error("upload_resume_failed", error=str(e), exc_info=True)
-        return {"error": str(e)}, 500
+        return {"error": {"code": "INTERNAL_ERROR",
+                "message": "Something went wrong"}}, 500
 
 
 @bp.route("/resume/<int:user_id>", methods=["DELETE"])
 @require_auth
 def delete_resume(user_id):
-    """ลบ Resume (จาก Supabase + DB)"""
+    """Delete Resume (from Supabase + DB)."""
     if user_id != g.user_id:
-        return {"error": {"code": "FORBIDDEN", "message": "ไม่มีสิทธิ์"}}, 403
+        return {"error": {"code": "FORBIDDEN", "message": "Forbidden"}}, 403
 
     try:
         old = db.session.execute(
@@ -132,7 +136,8 @@ def delete_resume(user_id):
         ).first()
 
         if not old or not old[0]:
-            return {"error": "No resume to delete"}, 404
+            return {"error": {"code": "NOT_FOUND",
+                    "message": "No resume to delete"}}, 404
 
         if "supabase.co" in old[0]:
             old_path = extract_supabase_path(old[0], "resumes")
@@ -141,8 +146,8 @@ def delete_resume(user_id):
 
         db.session.execute(
             text("""
-                UPDATE users 
-                SET resume_url = NULL, 
+                UPDATE users
+                SET resume_url = NULL,
                     resume_filename = NULL,
                     updated_at = NOW()
                 WHERE id = :uid
@@ -158,35 +163,39 @@ def delete_resume(user_id):
     except Exception as e:
         db.session.rollback()
         logger.error("delete_resume_failed", error=str(e), exc_info=True)
-        return {"error": str(e)}, 500
+        return {"error": {"code": "INTERNAL_ERROR",
+                "message": "Something went wrong"}}, 500
 
 
 @bp.route("/upload/avatar", methods=["POST"])
 @require_auth
 def upload_avatar():
-    """อัปโหลด Avatar → Supabase Storage"""
+    """Upload Avatar → Supabase Storage."""
     try:
         user_id = g.user_id
 
         if "avatar" not in request.files:
-            return {"error": "No file provided"}, 400
+            return {"error": {"code": "NO_FILE",
+                    "message": "No file provided"}}, 400
 
         file = request.files["avatar"]
 
         if file.filename == "":
-            return {"error": "Empty filename"}, 400
+            return {"error": {"code": "EMPTY_FILENAME",
+                    "message": "Empty filename"}}, 400
 
         if not is_safe_filename(file.filename):
-            return {"error": "Invalid filename"}, 400
+            return {"error": {"code": "INVALID_FILENAME",
+                    "message": "Invalid filename"}}, 400
 
         if not allowed_file(file.filename):
-            return {
-                "error": f"Invalid file type. Allowed: {', '.join(ALLOWED_EXTENSIONS)}"
-            }, 400
+            return {"error": {"code": "INVALID_FILE_TYPE",
+                    "message": f"Invalid file type. Allowed: {', '.join(ALLOWED_EXTENSIONS)}"}}, 400
 
         file_bytes = file.read()
         if not validate_file_magic(file_bytes, ["png", "jpg", "gif", "webp"]):
-            return {"error": "File is not a valid image"}, 400
+            return {"error": {"code": "INVALID_FILE",
+                    "message": "File is not a valid image"}}, 400
 
         ext = file.filename.rsplit(".", 1)[1].lower()
         storage_filename = f"avatar_user_{user_id}_{uuid.uuid4().hex[:8]}.{ext}"
@@ -205,14 +214,16 @@ def upload_avatar():
         upload_res = sb_upload("avatars", storage_filename, file_bytes, content_type)
 
         if upload_res.status_code not in (200, 201):
-            logger.error("supabase_upload_failed", status=upload_res.status_code, response=upload_res.text[:200])
-            return {"error": f"Upload failed: {upload_res.text}"}, 500
+            logger.error("supabase_upload_failed", status=upload_res.status_code,
+                         response=upload_res.text[:200])
+            return {"error": {"code": "UPLOAD_FAILED",
+                    "message": f"Upload failed: {upload_res.text}"}}, 500
 
         image_url = sb_public_url("avatars", storage_filename)
 
         db.session.execute(
             text("""
-                UPDATE users 
+                UPDATE users
                 SET profile_image = :img, updated_at = NOW()
                 WHERE id = :uid
             """),
@@ -220,12 +231,8 @@ def upload_avatar():
         )
         db.session.commit()
 
-        logger.info(
-            "avatar_uploaded",
-            user_id=user_id,
-            filename=storage_filename,
-            size_bytes=len(file_bytes),
-        )
+        logger.info("avatar_uploaded", user_id=user_id,
+                    filename=storage_filename, size_bytes=len(file_bytes))
 
         return {
             "status": "success",
@@ -237,63 +244,63 @@ def upload_avatar():
     except Exception as e:
         db.session.rollback()
         logger.error("upload_avatar_failed", error=str(e), exc_info=True)
-        return {"error": str(e)}, 500
+        return {"error": {"code": "INTERNAL_ERROR",
+                "message": "Something went wrong"}}, 500
 
 
-# ⭐ แก้: ไม่ UPDATE DB ที่นี่ — return URL เท่านั้น
-# frontend เอา URL ไป PUT /api/employer/profile ตอน Save
 @bp.route("/upload/company-logo", methods=["POST"])
 @require_auth
 @require_role("employer")
 def upload_company_logo():
     """
-    อัปโหลด Company Logo → Supabase Storage
+    Upload Company Logo → Supabase Storage.
 
-    ⭐ ไม่ UPDATE DB ที่นี่
-    return URL เท่านั้น → frontend เอาไป PUT /api/employer/profile ตอน Save
-    (การลบไฟล์เก่าเกิดขึ้นใน PUT /profile)
+    Note: does NOT update DB here.
+    Returns URL only — frontend calls PUT /api/employer/profile to save.
+    (Old file deletion happens in PUT /profile.)
     """
     try:
         user_id = g.user_id
 
         if "logo" not in request.files:
-            return {"error": "No file provided"}, 400
+            return {"error": {"code": "NO_FILE",
+                    "message": "No file provided"}}, 400
 
         file = request.files["logo"]
 
         if file.filename == "":
-            return {"error": "Empty filename"}, 400
+            return {"error": {"code": "EMPTY_FILENAME",
+                    "message": "Empty filename"}}, 400
 
         if not is_safe_filename(file.filename):
-            return {"error": "Invalid filename"}, 400
+            return {"error": {"code": "INVALID_FILENAME",
+                    "message": "Invalid filename"}}, 400
 
         if not allowed_file(file.filename):
-            return {
-                "error": f"Invalid file type. Allowed: {', '.join(ALLOWED_EXTENSIONS)}"
-            }, 400
+            return {"error": {"code": "INVALID_FILE_TYPE",
+                    "message": f"Invalid file type. Allowed: {', '.join(ALLOWED_EXTENSIONS)}"}}, 400
 
         file_bytes = file.read()
         if not validate_file_magic(file_bytes, ["png", "jpg", "gif", "webp"]):
-            return {"error": "File is not a valid image"}, 400
+            return {"error": {"code": "INVALID_FILE",
+                    "message": "File is not a valid image"}}, 400
 
         ext = file.filename.rsplit(".", 1)[1].lower()
         storage_filename = f"logo_user_{user_id}_{uuid.uuid4().hex[:8]}.{ext}"
         content_type = file.content_type or "image/jpeg"
 
-        # ⭐ ไม่ลบไฟล์เก่า / ไม่ UPDATE DB ที่นี่
         upload_res = sb_upload("company-logos", storage_filename, file_bytes, content_type)
 
         if upload_res.status_code not in (200, 201):
-            logger.error("supabase_upload_failed", status=upload_res.status_code, response=upload_res.text[:200])
-            return {"error": f"Upload failed: {upload_res.text}"}, 500
+            logger.error("supabase_upload_failed", status=upload_res.status_code,
+                         response=upload_res.text[:200])
+            return {"error": {"code": "UPLOAD_FAILED",
+                    "message": f"Upload failed: {upload_res.text}"}}, 500
 
         image_url = sb_public_url("company-logos", storage_filename)
 
-        logger.info(
-            "company_logo_uploaded_to_storage",
-            user_id=user_id,
-            filename=storage_filename,
-        )
+        logger.info("company_logo_uploaded_to_storage", user_id=user_id,
+                    filename=storage_filename)
 
         return {
             "status": "success",
@@ -304,4 +311,5 @@ def upload_company_logo():
 
     except Exception as e:
         logger.error("upload_company_logo_failed", error=str(e), exc_info=True)
-        return {"error": str(e)}, 500
+        return {"error": {"code": "INTERNAL_ERROR",
+                "message": "Something went wrong"}}, 500

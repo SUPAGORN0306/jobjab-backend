@@ -7,6 +7,7 @@ Routes:
     POST /api/auth/refresh
     POST /api/auth/logout
     GET  /api/auth/me
+    POST /api/auth/switch-role
 """
 import re
 import uuid
@@ -52,7 +53,6 @@ def _error(code: str, message: str, status: int = 400):
 
 
 def _user_dict(row) -> dict:
-    """แปลง row จาก DB → dict"""
     if not row:
         return {}
     d = dict(row)
@@ -63,7 +63,6 @@ def _user_dict(row) -> dict:
 
 
 def _get_user_roles(user_id: int) -> list[str]:
-    """ดึง roles ทั้งหมดของ user"""
     rows = db.session.execute(
         text("SELECT role FROM user_roles WHERE user_id = :uid ORDER BY role"),
         {"uid": user_id},
@@ -72,7 +71,6 @@ def _get_user_roles(user_id: int) -> list[str]:
 
 
 def _generate_username_from_email(email: str) -> str:
-    """สร้าง username ไม่ซ้ำจาก email"""
     base = email.split("@")[0].lower()
     base = re.sub(r"[^a-z0-9_]", "_", base)
     username = base
@@ -95,7 +93,7 @@ def _generate_username_from_email(email: str) -> str:
 @auth_bp.route("/register", methods=["POST"])
 @limiter.limit("10 per hour")
 def register():
-    """สมัครสมาชิกใหม่"""
+    """Register a new user account."""
     data = request.get_json(silent=True) or {}
 
     email = sanitize_text(data.get("email", ""), max_length=255).lower()
@@ -107,31 +105,31 @@ def register():
 
     # ---------- Validate ----------
     if not email or not password:
-        return _error("MISSING_FIELDS", "Email และ password จำเป็น")
+        return _error("MISSING_FIELDS", "Email and password are required")
 
     if not is_valid_email(email):
-        return _error("INVALID_EMAIL", "Email ไม่ถูกต้อง")
+        return _error("INVALID_EMAIL", "Invalid email format")
 
     ok, msg = is_valid_password(password)
     if not ok:
         return _error("WEAK_PASSWORD", msg)
 
     if role not in VALID_ROLES:
-        return _error("INVALID_ROLE", f"Role ต้องเป็น {VALID_ROLES}")
+        return _error("INVALID_ROLE", f"Role must be one of: {', '.join(VALID_ROLES)}")
 
     if role == "employer" and not company_name:
-        return _error("MISSING_COMPANY", "Employer ต้องระบุชื่อบริษัท")
+        return _error("MISSING_COMPANY", "Employer must provide a company name")
 
-    # ---------- ตรวจซ้ำ ----------
+    # ---------- Duplicate check ----------
     existing = db.session.execute(
         text("SELECT id FROM users WHERE email = :e"),
         {"e": email},
     ).first()
 
     if existing:
-        return _error("EMAIL_EXISTS", "Email นี้ถูกใช้แล้ว", 409)
+        return _error("EMAIL_EXISTS", "This email is already registered", 409)
 
-    # ---------- สร้าง user ----------
+    # ---------- Create user ----------
     username = _generate_username_from_email(email)
     password_hash = hash_password(password)
 
@@ -156,7 +154,6 @@ def register():
         user_row = result.mappings().first()
         user_id = user_row["id"]
 
-        # เพิ่ม role ใน user_roles
         db.session.execute(
             text("""
                 INSERT INTO user_roles (user_id, role, created_at)
@@ -165,7 +162,6 @@ def register():
             {"uid": user_id, "r": role},
         )
 
-        # ถ้า employer → สร้าง employer_profiles
         if role == "employer":
             db.session.execute(
                 text("""
@@ -186,17 +182,17 @@ def register():
     except IntegrityError as e:
         db.session.rollback()
         logger.error("register_integrity", error=str(e))
-        return _error("REGISTER_FAILED", "สมัครไม่สำเร็จ (ข้อมูลซ้ำ)", 409)
+        return _error("REGISTER_FAILED", "Registration failed (duplicate data)", 409)
     except Exception as e:
         db.session.rollback()
         logger.error("register_failed", error=str(e), exc_info=True)
-        return _error("REGISTER_FAILED", "สมัครไม่สำเร็จ", 500)
+        return _error("REGISTER_FAILED", "Registration failed", 500)
 
     logger.info("user_registered", user_id=user_id, email=email, role=role)
 
     return jsonify({
         "status": "success",
-        "message": "สมัครสมาชิกสำเร็จ",
+        "message": "Registration successful",
         "user": _user_dict(user_row),
     }), 201
 
@@ -208,16 +204,16 @@ def register():
 @auth_bp.route("/login", methods=["POST"])
 @limiter.limit("20 per minute")
 def login():
-    """เข้าสู่ระบบ + set cookies"""
+    """Login and set auth cookies."""
     data = request.get_json(silent=True) or {}
     email = sanitize_text(data.get("email", ""), max_length=255).lower()
     password = data.get("password", "")
     requested_role = (data.get("role") or "").lower()
 
     if not email or not password:
-        return _error("MISSING_CREDENTIALS", "กรุณากรอก email และ password")
+        return _error("MISSING_CREDENTIALS", "Email and password are required")
 
-    # ---------- หา user ----------
+    # ---------- Find user ----------
     row = db.session.execute(
         text("""
             SELECT id, username, email, password_hash, full_name,
@@ -229,11 +225,11 @@ def login():
 
     if not row or not verify_password(password, row["password_hash"]):
         logger.warning("login_failed", email=email)
-        return _error("INVALID_CREDENTIALS", "Email หรือ password ไม่ถูกต้อง", 401)
+        return _error("INVALID_CREDENTIALS", "Invalid email or password", 401)
 
     user_id = row["id"]
 
-    # ---------- Rehash ถ้าจำเป็น ----------
+    # ---------- Rehash if needed ----------
     new_hash = rehash_if_needed(password, row["password_hash"])
     if new_hash:
         try:
@@ -250,14 +246,14 @@ def login():
     # ---------- Roles ----------
     roles = _get_user_roles(user_id)
     if not roles:
-        return _error("NO_ROLE", "ไม่พบ role ของผู้ใช้", 403)
+        return _error("NO_ROLE", "User has no role assigned", 403)
 
     if requested_role and requested_role in roles:
         selected_role = requested_role
     else:
         selected_role = roles[0]
 
-    # ---------- สร้าง tokens ----------
+    # ---------- Create tokens ----------
     tokens = create_tokens_for_user(user_id, selected_role)
 
     # ---------- Response ----------
@@ -273,7 +269,6 @@ def login():
         "resume_filename": row.get("resume_filename"),
     }
 
-    # ถ้า employer → เพิ่มข้อมูลบริษัท
     if "employer" in roles:
         emp = db.session.execute(
             text("""
@@ -289,7 +284,7 @@ def login():
 
     response = jsonify({
         "status": "success",
-        "message": "เข้าสู่ระบบสำเร็จ",
+        "message": "Login successful",
         "user": response_user,
         "csrf_token": tokens["csrf_token"],
         "expires_in": tokens["expires_in"],
@@ -315,25 +310,22 @@ def login():
 @limiter.limit("30 per hour")
 @jwt_required(refresh=True)
 def refresh():
-    """Rotating refresh token"""
+    """Rotating refresh token."""
     claims = get_jwt()
     user_id = int(claims["sub"])
     jti = claims.get("jti")
     iat = claims.get("iat", 0)
 
-    # ---------- Blocklist check ----------
     if jti and is_token_revoked(jti):
-        return _error("TOKEN_REVOKED", "Token ถูกยกเลิก", 401)
+        return _error("TOKEN_REVOKED", "Token has been revoked", 401)
 
     if is_user_token_revoked(user_id, iat):
-        return _error("TOKEN_REVOKED", "Token ถูกยกเลิกทั้งหมด", 401)
+        return _error("TOKEN_REVOKED", "All tokens have been revoked", 401)
 
-    # ---------- Revoke ตัวเก่า (rotating) ----------
     if jti:
-        ttl = 60 * 60 * 24 * 7  # 7 วัน
+        ttl = 60 * 60 * 24 * 7
         revoke_token(jti, ttl)
 
-    # ---------- ดึง user ----------
     row = db.session.execute(
         text("""
             SELECT id, username, email, full_name
@@ -343,12 +335,11 @@ def refresh():
     ).mappings().first()
 
     if not row:
-        return _error("USER_NOT_FOUND", "ไม่พบผู้ใช้", 404)
+        return _error("USER_NOT_FOUND", "User not found", 404)
 
-    # ---------- ออก tokens ใหม่ ----------
     roles = _get_user_roles(user_id)
     if not roles:
-        return _error("NO_ROLE", "ไม่พบ role ของผู้ใช้", 403)
+        return _error("NO_ROLE", "User has no role assigned", 403)
     selected_role = claims.get("role") or roles[0]
 
     tokens = create_tokens_for_user(user_id, selected_role)
@@ -376,7 +367,7 @@ def refresh():
 @auth_bp.route("/logout", methods=["POST"])
 @jwt_required(refresh=True)
 def logout():
-    """ออกจากระบบ + revoke"""
+    """Logout and revoke refresh token."""
     claims = get_jwt()
     jti = claims.get("jti")
 
@@ -386,7 +377,7 @@ def logout():
 
     response = jsonify({
         "status": "success",
-        "message": "ออกจากระบบสำเร็จ",
+        "message": "Logged out successfully",
     })
     clear_all_auth_cookies(response)
     return response, 200
@@ -399,7 +390,7 @@ def logout():
 @auth_bp.route("/me", methods=["GET"])
 @require_auth
 def me():
-    """ข้อมูลผู้ใช้ปัจจุบัน"""
+    """Get current user info."""
     row = db.session.execute(
         text("""
             SELECT id, username, email, full_name, phone, location, bio,
@@ -411,14 +402,12 @@ def me():
     ).mappings().first()
 
     if not row:
-        return _error("USER_NOT_FOUND", "ไม่พบผู้ใช้", 404)
+        return _error("USER_NOT_FOUND", "User not found", 404)
 
     user = _user_dict(row)
     user["roles"] = _get_user_roles(g.user_id)
-    
     user["role"] = g.user_role or (user["roles"][0] if user["roles"] else None)
 
-    # ถ้า employer → เพิ่มข้อมูลบริษัท
     if "employer" in user["roles"]:
         emp = db.session.execute(
             text("""
@@ -434,14 +423,15 @@ def me():
 
     return jsonify({"user": user}), 200
 
+
 # ============================================================
-# SWITCH ROLE (multi-role user เปลี่ยน active role)
+# SWITCH ROLE
 # ============================================================
 
 @auth_bp.route("/switch-role", methods=["POST"])
 @require_auth
 def switch_role():
-    """สลับ active role ของ user (multi-role)
+    """Switch active role for multi-role user.
 
     Body: { "role": "candidate" | "employer" }
     """
@@ -449,10 +439,10 @@ def switch_role():
     requested_role = (data.get("role") or "").lower().strip()
 
     if not requested_role:
-        return _error("MISSING_ROLE", "ต้องระบุ role")
+        return _error("MISSING_ROLE", "Role is required")
 
     if requested_role not in VALID_ROLES:
-        return _error("INVALID_ROLE", f"Role ต้องเป็น {VALID_ROLES}")
+        return _error("INVALID_ROLE", f"Role must be one of: {', '.join(VALID_ROLES)}")
 
     roles = _get_user_roles(g.user_id)
     if requested_role not in roles:
@@ -462,14 +452,13 @@ def switch_role():
             requested_role=requested_role,
             owned_roles=roles,
         )
-        return _error("ROLE_NOT_OWNED", "คุณไม่มี role นี้", 403)
+        return _error("ROLE_NOT_OWNED", "You don't have this role", 403)
 
-    # ออก tokens ใหม่ (role ใหม่จะอยู่ใน access + refresh claim)
     tokens = create_tokens_for_user(g.user_id, requested_role)
 
     response = jsonify({
         "status": "success",
-        "message": "สลับ role สำเร็จ",
+        "message": "Role switched successfully",
         "role": requested_role,
         "csrf_token": tokens["csrf_token"],
         "expires_in": tokens["expires_in"],
@@ -484,4 +473,3 @@ def switch_role():
     logger.info("role_switched", user_id=g.user_id, new_role=requested_role)
 
     return response, 200
-

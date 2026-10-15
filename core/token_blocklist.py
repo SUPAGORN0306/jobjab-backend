@@ -15,10 +15,10 @@ from core.config import settings
 # ============================================================
 
 class _MemoryBackend:
-    """In-memory backend — dev only"""
+    """In-memory backend — dev only."""
 
     def __init__(self) -> None:
-        # เก็บ (value, expires_at)
+        # Stores (value, expires_at)
         self._store: dict[str, tuple[str, float]] = {}
 
     def setex(self, key: str, ttl: int, value: str = "1") -> None:
@@ -77,14 +77,14 @@ _USER_REVOKE_PREFIX = "jobjab:blocklist:user:"
 # ============================================================
 
 def revoke_token(jti: str, ttl_seconds: int) -> None:
-    """เพิ่ม jti เข้า blocklist (TTL = เวลาที่เหลือของ token)"""
+    """Add jti to blocklist (TTL = remaining token lifetime)."""
     if not jti or ttl_seconds <= 0:
         return
     _backend.setex(f"{_JTI_PREFIX}{jti}", ttl_seconds, "1")
 
 
 def is_token_revoked(jti: str) -> bool:
-    """ตรวจว่า jti ถูก revoke ไหม"""
+    """Check if jti has been revoked."""
     if not jti:
         return False
     return _backend.exists(f"{_JTI_PREFIX}{jti}")
@@ -95,7 +95,7 @@ def is_token_revoked(jti: str) -> bool:
 # ============================================================
 
 def revoke_all_user_tokens(user_id: int, ttl_seconds: int | None = None) -> None:
-    """Revoke ทุก token ของ user ที่ออกก่อนตอนนี้ (ใช้ตอน change password)"""
+    """Revoke all user tokens issued before now (used on password change)."""
     if ttl_seconds is None:
         ttl_seconds = settings.JWT_REFRESH_TOKEN_EXPIRES_DAYS * 24 * 3600
 
@@ -104,7 +104,7 @@ def revoke_all_user_tokens(user_id: int, ttl_seconds: int | None = None) -> None
 
 
 def is_user_token_revoked(user_id: int, token_iat: int) -> bool:
-    """ตรวจว่า token ที่ออกตอน iat ถูก revoke ไหม"""
+    """Check if token issued at `iat` has been revoked."""
     val = _backend.get(f"{_USER_REVOKE_PREFIX}{user_id}")
     if not val:
         return False
@@ -119,7 +119,7 @@ def is_user_token_revoked(user_id: int, token_iat: int) -> bool:
 # ============================================================
 
 def is_healthy() -> bool:
-    """ตรวจ backend ทำงาน"""
+    """Check backend health."""
     try:
         return _backend.ping()
     except Exception:

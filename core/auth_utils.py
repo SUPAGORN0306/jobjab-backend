@@ -1,10 +1,10 @@
 """
 auth_utils.py — JWT helpers
 
-- create_tokens_for_user : สร้าง access + refresh + csrf
+- create_tokens_for_user : create access + refresh + csrf
 - generate_csrf_token    : secrets.token_urlsafe
-- decode_token_payload   : ดึง payload จาก token
-- seconds_until_expiry   : TTL ของ token ที่เหลือ
+- decode_token_payload   : decode token payload
+- get_token_ttl_seconds  : remaining TTL of token
 """
 import secrets
 import uuid
@@ -25,7 +25,7 @@ from core.config import settings
 
 def create_tokens_for_user(user_id: int, role: str) -> dict:
     """
-    สร้าง tokens ทั้งหมดที่ต้องใช้หลัง login
+    Create all tokens needed after login.
 
     Returns:
         {
@@ -78,7 +78,7 @@ def create_tokens_for_user(user_id: int, role: str) -> dict:
 # ============================================================
 
 def generate_csrf_token() -> str:
-    """สร้าง CSRF token แบบสุ่ม (URL-safe)"""
+    """Generate a random URL-safe CSRF token."""
     return secrets.token_urlsafe(32)
 
 
@@ -88,8 +88,8 @@ def generate_csrf_token() -> str:
 
 def decode_token_payload(token: str) -> dict | None:
     """
-    Decode token (verify signature ด้วย)
-    Returns None ถ้า invalid
+    Decode token (verify signature).
+    Returns None if invalid.
     """
     try:
         return decode_token(token)
@@ -99,8 +99,8 @@ def decode_token_payload(token: str) -> dict | None:
 
 def get_token_ttl_seconds(token: str) -> int:
     """
-    คำนวณเวลาที่เหลือของ token (วินาที)
-    ใช้ตอน revoke — เก็บ jti ใน blocklist เท่ากับ TTL
+    Compute remaining token TTL in seconds.
+    Used when revoking — store jti in blocklist with same TTL.
     """
     payload = decode_token_payload(token)
     if not payload:
@@ -115,7 +115,7 @@ def get_token_ttl_seconds(token: str) -> int:
 
 
 def is_token_type_refresh(payload: dict) -> bool:
-    """ตรวจว่าเป็น refresh token ไหม"""
+    """Check if token is a refresh token."""
     return payload.get("type") == "refresh"
 
 
@@ -124,7 +124,7 @@ def is_token_type_refresh(payload: dict) -> bool:
 # ============================================================
 
 def get_user_id_from_payload(payload: dict) -> int | None:
-    """ดึง user_id จาก payload (sub)"""
+    """Extract user_id from payload (sub)."""
     sub = payload.get("sub")
     if not sub:
         return None
@@ -135,10 +135,10 @@ def get_user_id_from_payload(payload: dict) -> int | None:
 
 
 def get_role_from_payload(payload: dict) -> str | None:
-    """ดึง role จาก payload"""
+    """Extract role from payload."""
     return payload.get("role")
 
 
 def get_jti_from_payload(payload: dict) -> str | None:
-    """ดึง jti จาก payload"""
+    """Extract jti from payload."""
     return payload.get("jti")

@@ -11,13 +11,18 @@ from flask import Blueprint, request
 from core.extensions import db, cache
 from core.logging_config import get_logger
 from services.match_score import (
-    load_user_data, load_user_data_combined, prepare_user_data,
-    calculate_match_score_v2, calculate_match_score_v2_prepared
+    load_user_data_combined, prepare_user_data,
+    calculate_match_score_v2_prepared
 )
-from services.serializers import format_salary, get_company_initial, serialize_row
+from services.serializers import (
+    format_salary, get_company_initial, serialize_row, apply_job_fills,
+)
+from services.job_fill_stats import get_fill_stats
 
 bp = Blueprint("jobs", __name__, url_prefix="/api")
 logger = get_logger(__name__)
+
+MATCH_SORT_HARD_CAP = 1000
 
 
 @bp.route("/jobs")
@@ -38,7 +43,6 @@ def get_jobs():
         else:
             offset = (page - 1) * limit
 
-        # Filters
         q = (request.args.get("q") or "").strip()
         position = (request.args.get("position") or "").strip()
         level = (request.args.get("level") or "").strip()
@@ -109,14 +113,13 @@ def get_jobs():
         # ═══════════════════════════════════════
         # 4. ORDER BY
         # ═══════════════════════════════════════
-        # ⭐ sort=match → ต้องคำนวณใน Python (เพราะ match_score มาจาก Python ไม่ใช่ SQL)
         is_match_sort = (sort == "match" and user_id)
 
         order_by = {
             "newest": "j.posted_date DESC NULLS LAST",
             "salary_high": "j.salary_max DESC NULLS LAST",
             "salary_low": "j.salary_min ASC NULLS LAST",
-            "match": "j.id",  # fallback (ใช้เมื่อ is_match_sort=False)
+            "match": "j.id",
         }.get(sort, "j.posted_date DESC NULLS LAST")
 
         # ═══════════════════════════════════════
@@ -131,19 +134,20 @@ def get_jobs():
         # 6. FETCH PAGE
         # ═══════════════════════════════════════
         if is_match_sort:
-            # fetch ทั้งหมด (ไม่ LIMIT) — จะ sort + paginate ใน Python
             result = db.session.execute(text(f"""
                 SELECT
                     j.id, j.company_name, j.industry, j.job_title,
                     j.skills_required, j.experience_level, j.employment_type,
                     j.location, j.posted_date, j.company_size,
-                    j.salary_min, j.salary_max,
+                    j.salary_min, j.salary_max, j.team_size,
                     COUNT(a.id) AS applicant_count
                 FROM job_market_data j
                 LEFT JOIN applications a ON j.id = a.job_id
                 WHERE {where_sql}
                 GROUP BY j.id
-            """), params)
+                ORDER BY j.posted_date DESC NULLS LAST
+                LIMIT :cap
+            """), {**params, "cap": MATCH_SORT_HARD_CAP})
         else:
             query_params = {**params, "limit": limit, "offset": offset}
             result = db.session.execute(text(f"""
@@ -151,7 +155,7 @@ def get_jobs():
                     j.id, j.company_name, j.industry, j.job_title,
                     j.skills_required, j.experience_level, j.employment_type,
                     j.location, j.posted_date, j.company_size,
-                    j.salary_min, j.salary_max,
+                    j.salary_min, j.salary_max, j.team_size,
                     COUNT(a.id) AS applicant_count
                 FROM job_market_data j
                 LEFT JOIN applications a ON j.id = a.job_id
@@ -164,7 +168,7 @@ def get_jobs():
         rows = result.mappings().all()
 
         # ═══════════════════════════════════════
-        # 7. MATCH SCORE
+        # 7. MATCH SCORE + FILL NULLs
         # ═══════════════════════════════════════
         user_data = None
         if user_id:
@@ -172,11 +176,30 @@ def get_jobs():
                 load_user_data_combined(user_id, db.session)
             )
 
+        # cached stats (median/mean/mode) — 1 hr TTL
+        fill_stats = get_fill_stats()
+
+        # forward-fill employment_type per (company_name, industry) group
+        prev_emp_by_group = {}
+
         jobs_list = []
         for row in rows:
             job_dict = dict(row)
             count = job_dict.get("applicant_count", 0)
 
+            # ── fill NULLs (ก่อน match score) ──
+            group_key = (
+                job_dict.get("company_name"),
+                job_dict.get("industry"),
+            )
+            prev_emp = prev_emp_by_group.get(group_key)
+
+            job_dict, emp_used = apply_job_fills(
+                job_dict, fill_stats, prev_employment_type=prev_emp,
+            )
+            prev_emp_by_group[group_key] = emp_used
+
+            # ── match score ──
             if user_id and user_data:
                 match = calculate_match_score_v2_prepared(job_dict, user_data)
                 match_score = match["overall"]
@@ -184,12 +207,19 @@ def get_jobs():
                     "skills": match["skills_match"],
                     "experience": match["experience_match"],
                     "industry": match["industry_match"],
+                    "has_skills": match.get("has_skills", False),
+                    "weights": match.get("weights", {
+                        "skills": 0.5, "experience": 0.3, "industry": 0.2,
+                    }),
+                    "skills_detail": match.get("skills_detail", {}),
+                    "experience_detail": match.get("experience_detail", {}),
+                    "industry_detail": match.get("industry_detail", {}),
                 }
                 matched_skills = match.get("matched_skills", [])
                 missing_skills = match.get("missing_skills", [])
             else:
-                match_score = 75
-                match_breakdown = {"skills": 75, "experience": 75, "industry": 75}
+                match_score = None
+                match_breakdown = None
                 matched_skills = []
                 missing_skills = []
 
@@ -216,6 +246,7 @@ def get_jobs():
                 "work_mode": "Remote",
                 "skills_required": job_dict.get("skills_required"),
                 "company_size": job_dict.get("company_size"),
+                "team_size": job_dict.get("team_size"),
                 "posted_date": job_dict.get("posted_date"),
                 "company_name": job_dict.get("company_name"),
                 "job_title": job_dict.get("job_title"),
@@ -224,16 +255,14 @@ def get_jobs():
             }
 
             jobs_list.append(mapped_job)
-        # ═══════════════════════════════════════
-        # 7.5 SORT BY MATCH + PAGINATE (Python)
-        # ═══════════════════════════════════════
+
+        # Sort by match + paginate in Python
         if is_match_sort:
             jobs_list.sort(
-                key=lambda j: j.get("match_score", 0),
+                key=lambda j: j.get("match_score") or 0,
                 reverse=True
             )
             jobs_list = jobs_list[offset:offset + limit]
-
 
         # ═══════════════════════════════════════
         # 8. GLOBAL STATS
@@ -276,12 +305,14 @@ def get_jobs():
 
     except Exception as e:
         logger.error("get_jobs_failed", error=str(e), exc_info=True)
-        return {"error": {"code": "INTERNAL_ERROR", "message": "ไม่สามารถโหลดงานได้"}}, 500
+        db.session.rollback()
+        return {"error": {"code": "INTERNAL_ERROR",
+                "message": "Failed to load jobs"}}, 500
 
 
 @bp.route("/_debug/cache")
 def debug_cache():
-    """Debug endpoint — ดู cache state"""
+    """Debug endpoint — view cache state."""
     from core.extensions import cache
     keys = []
     if hasattr(cache.cache, '_cache'):
@@ -300,14 +331,13 @@ def get_job_detail(job_id):
 
         result = db.session.execute(
             text("""
-                SELECT 
+                SELECT
                     id, company_name, industry, job_title,
                     skills_required, experience_level, employment_type,
                     location, posted_date, company_size,
                     salary_min, salary_max, about_role, responsibilities,
-                    requirements, team_size, visa_sponsorship, posted_ago,
-                    match_score
-                FROM job_market_data 
+                    requirements, team_size, visa_sponsorship, posted_ago
+                FROM job_market_data
                 WHERE id = :job_id
                 AND (status = 'active' OR status IS NULL)
             """),
@@ -316,9 +346,17 @@ def get_job_detail(job_id):
         job = result.mappings().first()
 
         if not job:
-            return {"error": "Job not found"}, 404
+            return {"error": {"code": "NOT_FOUND",
+                    "message": "Job not found"}}, 404
 
         job_dict = serialize_row(job)
+
+        # ── fill NULLs (เหมือนใน list) ──
+        fill_stats = get_fill_stats()
+        job_dict, _ = apply_job_fills(
+            job_dict, fill_stats, prev_employment_type=None,
+        )
+
         job_dict["title"] = job_dict.get("job_title")
         job_dict["company"] = job_dict.get("company_name")
         job_dict["type"] = job_dict.get("employment_type")
@@ -329,7 +367,6 @@ def get_job_detail(job_id):
         )
 
         if user_id:
-            # ⚠️ Bug fix: ต้อง load_user_data_combined ก่อน prepare
             user_data = prepare_user_data(load_user_data_combined(user_id, db.session))
             match = calculate_match_score_v2_prepared(job_dict, user_data)
             job_dict["match_score"] = match["overall"]
@@ -337,17 +374,26 @@ def get_job_detail(job_id):
                 "skills": match["skills_match"],
                 "experience": match["experience_match"],
                 "industry": match["industry_match"],
+                "has_skills": match.get("has_skills", False),
+                "weights": match.get("weights", {
+                    "skills": 0.5, "experience": 0.3, "industry": 0.2,
+                }),
+                "skills_detail": match.get("skills_detail", {}),
+                "experience_detail": match.get("experience_detail", {}),
+                "industry_detail": match.get("industry_detail", {}),
             }
             job_dict["matched_skills"] = match["matched_skills"]
             job_dict["missing_skills"] = match["missing_skills"]
         else:
-            job_dict["match_score"] = 75
-            job_dict["match_breakdown"] = {"skills": 75, "experience": 75, "industry": 75}
+            job_dict["match_score"] = None
+            job_dict["match_breakdown"] = None
             job_dict["matched_skills"] = []
             job_dict["missing_skills"] = []
 
         return {"job": job_dict}
 
     except Exception as e:
-        logger.error("operation_failed", error=str(e), exc_info=True)
-        return {"error": {"code": "INTERNAL_ERROR", "message": "เกิดข้อผิดพลาด"}}, 500
+        logger.error("get_job_detail_failed", error=str(e), exc_info=True)
+        db.session.rollback()          # ← เพิ่มบรรทัดนี้
+        return {"error": {"code": "INTERNAL_ERROR",
+                "message": "Something went wrong"}}, 500
